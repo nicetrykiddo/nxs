@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import getpass
+import itertools
 import json
 import re
 import sys
@@ -97,6 +98,7 @@ def resolve_credentials(
     ntlm_hash: Optional[str],
     domain: Optional[str],
     creds_file: Optional[str],
+    combo: bool = False,
 ) -> list[Credential]:
     if creds_file:
         path = Path(creds_file)
@@ -132,8 +134,20 @@ def resolve_credentials(
 
     if ntlm_hash:
         hashes = read_file_or_value(ntlm_hash)
-        if len(hashes) != len(users):
-            raise typer.BadParameter(f"-u has {len(users)} entries but -H has {len(hashes)}")
+        if combo:
+            return [
+                Credential(user=u, ntlm_hash=normalize_hash(h), domain=domain)
+                for u, h in itertools.product(users, hashes)
+            ]
+        if len(hashes) == 1:
+            hashes = hashes * len(users)
+        elif len(users) == 1:
+            users = users * len(hashes)
+        elif len(hashes) != len(users):
+            raise typer.BadParameter(
+                f"-u has {len(users)} entries but -H has {len(hashes)}. "
+                f"Use -C/--combo to try all {len(users)}×{len(hashes)} combinations"
+            )
         return [
             Credential(user=u, ntlm_hash=normalize_hash(h), domain=domain)
             for u, h in zip(users, hashes)
@@ -141,8 +155,20 @@ def resolve_credentials(
 
     if password:
         passwords = read_file_or_value(password)
-        if len(passwords) != len(users):
-            raise typer.BadParameter(f"-u has {len(users)} entries but -p has {len(passwords)}")
+        if combo:
+            return [
+                Credential(user=u, password=p, domain=domain)
+                for u, p in itertools.product(users, passwords)
+            ]
+        if len(passwords) == 1:
+            passwords = passwords * len(users)
+        elif len(users) == 1:
+            users = users * len(passwords)
+        elif len(passwords) != len(users):
+            raise typer.BadParameter(
+                f"-u has {len(users)} entries but -p has {len(passwords)}. "
+                f"Use -C/--combo to try all {len(users)}×{len(passwords)} combinations"
+            )
         return [
             Credential(user=u, password=p, domain=domain)
             for u, p in zip(users, passwords)
@@ -209,6 +235,7 @@ def main(
     password: Optional[str] = typer.Option(None, "-p", "--password", help="Password or file with passwords"),
     ntlm_hash: Optional[str] = typer.Option(None, "-H", "--hash", help="NTLM hash or file with hashes"),
     domain: Optional[str] = typer.Option(None, "-d", "--domain", help="Domain"),
+    combo: bool = typer.Option(False, "-C", "--combo", help="Try all user×password combinations"),
     opsec: bool = typer.Option(False, "--opsec", help="Single-threaded, low retry"),
     protocols: Optional[str] = typer.Option(None, "--protocols", help=f"Comma list ({PROTOCOL_LIST})"),
     local_auth: bool = typer.Option(False, "--local-auth", help="Local auth for SMB/WMI"),
@@ -233,7 +260,7 @@ def main(
         threads = 1
         retries = min(retries, 1)
 
-    creds = resolve_credentials(user, password, ntlm_hash, domain, creds_file)
+    creds = resolve_credentials(user, password, ntlm_hash, domain, creds_file, combo=combo)
     stream_results = not json_out and not quiet
     all_json_rows = []
 

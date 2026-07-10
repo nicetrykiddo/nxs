@@ -39,6 +39,12 @@ nxs 10.10.10.10 -u admin -p 'Password123!'
 # Spray a file of credentials (format: user:pass or user:hash)
 nxs 10.10.10.10 -f creds.txt
 
+# Password spray — one password across a user list
+nxs 10.10.10.10 -u users.txt -p 'Password123!'
+
+# All combinations — every user × every password (-C/--combo)
+nxs 10.10.10.10 -u users.txt -p passwords.txt -C
+
 # Specific protocols
 nxs 192.168.1.0/24 -u john.doe -H 'LM:NT' --protocols ssh,winrm
 ```
