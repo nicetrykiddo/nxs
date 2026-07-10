@@ -57,10 +57,35 @@ def print_scan_header(target: str, user: str, domain: str | None, protocol_count
     )
 
 
+def print_probe_summary(target: str, reachable: list[str], total: int) -> None:
+    names = ", ".join(p.upper() for p in reachable) if reachable else "none"
+    console.print(
+        f"\n[dim]nxs v{__version__}[/dim]"
+        f" [bold]{target}[/bold]"
+        f" · [dim]probe: {len(reachable)}/{total} ports open[/dim]"
+        f" · [cyan]{names}[/cyan]\n"
+    )
+
+
+def print_anchor_result(user: str, domain: str | None, anchor: str, ok: bool, proof: str) -> None:
+    identity = f"{user}@{domain}" if domain else user
+    if ok:
+        console.print(
+            f"  [green][+][/green] [bold]{identity}[/bold]"
+            f" · [blue]{anchor.upper()}[/blue] [green]valid[/green]"
+            f" — {proof}"
+        )
+    else:
+        console.print(
+            f"  [red][-][/red] [dim]{identity}[/dim]"
+            f" · [blue]{anchor.upper()}[/blue] [red]failed[/red]"
+            f" — {proof}"
+        )
+
+
 import re
 
 def clean_nxc_line(line: str) -> str:
-    # Match nxc output prefix like "SMB         10.129.2.214    445    G0               "
     match = re.match(r"^[A-Z]+\s+[0-9a-fA-F\.\:]+\s+\d+\s+\S+\s+(.*)", line)
     return match.group(1).strip() if match else line.strip()
 

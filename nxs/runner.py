@@ -143,6 +143,35 @@ def check_port_state(target: str, protocol: str) -> str:
     return "port closed / filtered"
 
 
+def probe_ports(target: str, protocols: list[str], timeout: int = 5) -> list[str]:
+    """Quick TCP probe — returns only protocols whose ports are open."""
+    nmap = shutil.which("nmap")
+    if not nmap:
+        return protocols[:]
+
+    ports = [PORT_MAP[p] for p in protocols if p in PORT_MAP]
+    if not ports:
+        return protocols[:]
+
+    port_to_proto = {PORT_MAP[p]: p for p in protocols if p in PORT_MAP}
+
+    try:
+        result = subprocess.run(
+            [nmap, "-Pn", "-T4", "-p", ",".join(ports), target],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        reachable = []
+        for line in result.stdout.splitlines():
+            for port, proto in port_to_proto.items():
+                if f"{port}/tcp" in line and "open" in line and "filtered" not in line:
+                    reachable.append(proto)
+        return reachable
+    except Exception:
+        return protocols[:]
+
+
 def auth_state(output: str, user: str, target: str, protocol: str) -> tuple[bool | None, str]:
     if not output.strip():
         return False, check_port_state(target, protocol)

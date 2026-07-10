@@ -10,3 +10,5 @@ SUPPORTED_PROTOCOLS = [
     "vnc",
     "nfs",
 ]
+
+ANCHOR_PRIORITY = ["smb", "ssh", "ldap", "winrm", "wmi", "rdp", "mssql", "ftp", "vnc", "nfs"]
