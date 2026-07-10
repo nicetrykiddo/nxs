@@ -3,11 +3,29 @@ from __future__ import annotations
 import json
 
 from rich.console import Console
+from rich.panel import Panel
 
 from . import __version__
 from .models import ProtocolResult
 
 console = Console()
+
+def print_banner() -> None:
+    banner = (
+        "[bold cyan]nxs[/bold cyan] - [dim]Credential capability mapping for NetExec[/dim]\n\n"
+        "[white]Stop guessing what your creds can do. Blasts your credentials\n"
+        "across all protocols and maps out your exact access level.[/white]\n\n"
+        "[blue]Usage:[/blue] [bold]nxs[/bold] [dim]<target> -u <user> -p <pass>[/dim]\n"
+        "[blue]Help:[/blue]  [bold]nxs[/bold] [dim]--help[/dim]"
+    )
+    console.print(
+        Panel(
+            banner,
+            title=f"nxs v{__version__}",
+            border_style="cyan",
+            expand=False,
+        )
+    )
 
 LEVEL_STYLE = {
     "NO": "red",

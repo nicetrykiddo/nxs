@@ -16,8 +16,16 @@ from .output import print_result_event, print_results, print_scan_header, result
 from .profiles import SUPPORTED_PROTOCOLS
 from .runner import save_records, test_protocol
 
-app = typer.Typer(
-    no_args_is_help=True,
+class NxsTyper(typer.Typer):
+    def __call__(self, *args, **kwargs):
+        if len(sys.argv) == 1:
+            from .output import print_banner
+            print_banner()
+            sys.exit(0)
+        return super().__call__(*args, **kwargs)
+
+app = NxsTyper(
+    no_args_is_help=False,
     add_completion=False,
 )
 
