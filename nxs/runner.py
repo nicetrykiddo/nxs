@@ -34,34 +34,30 @@ def strip_ansi(text: str) -> str:
     return ANSI_RE.sub("", text or "")
 
 
-def mask_command(command: list[str]) -> list[str]:
-    masked = command[:]
-    for flag in ("-p", "--password", "-H", "--hash"):
-        if flag in masked:
-            i = masked.index(flag)
-            if i + 1 < len(masked):
-                masked[i + 1] = "***"
-    return masked
-
+_nxc_cache: str | None = None
 
 def find_nxc() -> str:
+    global _nxc_cache
+    if _nxc_cache:
+        return _nxc_cache
     path = shutil.which("nxc") or shutil.which("netexec")
     if not path:
         from rich.console import Console
         Console(stderr=True).print("[red][-][/red] nxc/netexec not found in PATH")
         raise SystemExit(1)
+    _nxc_cache = path
     return path
 
 
 def run_command(command: list[str], timeout: int, debug: bool = False) -> CommandRecord:
     if debug:
-        print("[debug]", " ".join(mask_command(command)))
+        print("[debug]", " ".join(command))
     try:
         proc = subprocess.run(command, text=True, capture_output=True, timeout=timeout)
         output = strip_ansi((proc.stdout or "") + (proc.stderr or ""))
-        return CommandRecord(mask_command(command), proc.returncode, output)
+        return CommandRecord(command[:], proc.returncode, output)
     except subprocess.TimeoutExpired:
-        return CommandRecord(mask_command(command), 124, "TIMEOUT")
+        return CommandRecord(command[:], 124, "TIMEOUT")
 
 
 def auth_args(cred: Credential, kerberos: bool = False, kdc_host: str | None = None) -> list[str]:
@@ -210,6 +206,7 @@ def auth_state(output: str, user: str, target: str, protocol: str) -> tuple[bool
 
 def smb_capability(output: str) -> tuple[str, str]:
     shares: list[str] = []
+    is_admin = False
 
     for line in output.splitlines():
         match = PERM_RE.search(line)
@@ -219,11 +216,17 @@ def smb_capability(output: str) -> tuple[str, str]:
         share = match.group("share")
         perm = match.group("perm")
 
+        if share.upper() in {"ADMIN$", "C$"} and "WRITE" in perm:
+            is_admin = True
+
         if share.upper() in {"IPC$", "ADMIN$", "C$"}:
             continue
 
         shares.append(f"{share}[{perm.replace(',', '+')}]")
 
+    if is_admin:
+        detail = ", ".join(shares) if shares else "admin shares writable"
+        return "ADMIN", detail
     if any("WRITE" in item for item in shares):
         return "WRITE", ", ".join(shares)
     if shares:

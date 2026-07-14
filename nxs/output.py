@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-import json
+import re
 
 from rich.console import Console
 from rich.panel import Panel
 
 from . import __version__
-from .models import ProtocolResult
+from .models import Credential, ProtocolResult
 
 console = Console()
 
@@ -48,8 +48,19 @@ LEVEL_MARK = {
 }
 
 
-def print_scan_header(target: str, user: str, domain: str | None, protocol_count: int) -> None:
-    identity = f"{user}@{domain}" if domain else user
+def cred_label(cred: Credential) -> str:
+    """Format credential for display: user:secret."""
+    if cred.ntlm_hash:
+        return f"{cred.user}:{cred.ntlm_hash}"
+    if cred.password:
+        return f"{cred.user}:{cred.password}"
+    return cred.user
+
+
+def print_scan_header(target: str, cred: Credential, domain: str | None, protocol_count: int) -> None:
+    identity = cred_label(cred)
+    if domain:
+        identity += f"@{domain}"
     console.print(
         f"\n[dim]nxs v{__version__}[/dim]"
         f" [bold]{target}[/bold] · {identity}"
@@ -57,37 +68,37 @@ def print_scan_header(target: str, user: str, domain: str | None, protocol_count
     )
 
 
-def print_probe_summary(target: str, reachable: list[str], total: int) -> None:
+def print_probe_summary(target: str, reachable: list[str], total: int, domain: str | None = None) -> None:
     names = ", ".join(p.upper() for p in reachable) if reachable else "none"
+    domain_str = f" · [dim]{domain}[/dim]" if domain else ""
     console.print(
         f"\n[dim]nxs v{__version__}[/dim]"
-        f" [bold]{target}[/bold]"
+        f" [bold]{target}[/bold]{domain_str}"
         f" · [dim]probe: {len(reachable)}/{total} ports open[/dim]"
         f" · [cyan]{names}[/cyan]\n"
     )
 
 
-def print_anchor_result(user: str, domain: str | None, anchor: str, ok: bool, proof: str) -> None:
-    identity = f"{user}@{domain}" if domain else user
+def print_anchor_result(cred: Credential, anchor: str, ok: bool, proof: str) -> None:
+    label = cred_label(cred)
     if ok:
         console.print(
-            f"  [green][+][/green] [bold]{identity}[/bold]"
+            f"  [green][+][/green] [bold]{label}[/bold]"
             f" · [blue]{anchor.upper()}[/blue] [green]valid[/green]"
             f" — {proof}"
         )
     else:
         console.print(
-            f"  [red][-][/red] [dim]{identity}[/dim]"
+            f"  [red][-][/red] [dim]{label}[/dim]"
             f" · [blue]{anchor.upper()}[/blue] [red]failed[/red]"
             f" — {proof}"
         )
 
 
-import re
-
 def clean_nxc_line(line: str) -> str:
-    match = re.match(r"^[A-Z]+\s+[0-9a-fA-F\.\:]+\s+\d+\s+\S+\s+(.*)", line)
+    match = re.match(r"^[A-Z]+\s+[0-9a-fA-F\.\\:]+\s+\d+\s+\S+\s+(.*)", line)
     return match.group(1).strip() if match else line.strip()
+
 
 def extract_verbose_details(result: ProtocolResult) -> list[str]:
     details = []
@@ -97,7 +108,7 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
     proto = result.protocol.lower()
     raw = "\n".join(r.output for r in result.records)
 
-    if proto == "smb" and result.level in {"READ", "WRITE"}:
+    if proto == "smb" and result.level in {"READ", "WRITE", "ADMIN"}:
         for line in raw.splitlines():
             if "READ" in line or "WRITE" in line:
                 details.append(clean_nxc_line(line))
@@ -155,20 +166,3 @@ def print_results(
 
     for result in results:
         print_result_event(result, verbose=verbose)
-
-
-def results_json(
-    target: str,
-    user: str,
-    domain: str | None,
-    results: list[ProtocolResult],
-    raw: bool = False,
-) -> str:
-    data = {
-        "target": target,
-        "user": user,
-        "domain": domain,
-        "results": [r.public_dict(raw=raw) for r in results],
-    }
-
-    return json.dumps(data, indent=2)

@@ -14,12 +14,12 @@ import typer
 from . import __version__
 from .models import Credential
 from .output import (
+    console,
     print_anchor_result,
     print_probe_summary,
     print_result_event,
     print_results,
     print_scan_header,
-    results_json,
 )
 from .profiles import ANCHOR_PRIORITY, SUPPORTED_PROTOCOLS
 from .runner import probe_ports, save_records, test_protocol
@@ -53,10 +53,13 @@ def version_callback(value: bool):
 def read_file_or_value(value: str) -> list[str]:
     path = Path(value)
     if path.is_file():
-        return [
+        lines = [
             line.strip() for line in path.read_text(encoding="utf-8", errors="ignore").splitlines()
             if line.strip() and not line.startswith("#")
         ]
+        if not lines:
+            raise typer.BadParameter(f"file is empty: {value}")
+        return lines
     if path.suffix.lower() in {".txt", ".lst", ".list", ".csv", ".tsv", ".conf", ".cfg"}:
         raise typer.BadParameter(f"file not found: {value}")
     return [value]
@@ -130,6 +133,8 @@ def resolve_credentials(
                 creds.append(Credential(user=u, ntlm_hash=parsed_hash, domain=domain))
             except typer.BadParameter:
                 creds.append(Credential(user=u, password=secret, domain=domain))
+        if not creds:
+            raise typer.BadParameter(f"no valid entries in creds file: {creds_file}")
         return creds
 
     if not user:
@@ -208,18 +213,10 @@ def run_check(
     with ThreadPoolExecutor(max_workers=threads) as executor:
         futures = [
             executor.submit(
-                test_protocol,
-                target,
-                protocol,
-                cred,
-                timeout,
-                retries,
-                local_auth=local_auth,
-                try_local=try_local,
-                kerberos=kerberos,
-                kdc_host=kdc_host,
-                debug=debug,
-                delay=delay,
+                test_protocol, target, protocol, cred, timeout, retries,
+                local_auth=local_auth, try_local=try_local,
+                kerberos=kerberos, kdc_host=kdc_host,
+                debug=debug, delay=delay,
             )
             for protocol in protocols
         ]
@@ -227,12 +224,18 @@ def run_check(
         for future in as_completed(futures):
             result = future.result()
             results.append(result)
-
             if on_result:
                 on_result(result)
 
     order = {proto: idx for idx, proto in enumerate(protocols)}
     return sorted(results, key=lambda r: order.get(r.protocol, 999))
+
+
+def _make_stream_handler(verbose: bool):
+    """Single factory for the on_result streaming callback."""
+    def handler(res):
+        print_result_event(res, verbose=verbose)
+    return handler
 
 
 @app.command()
@@ -269,29 +272,29 @@ def main(
         retries = min(retries, 1)
 
     creds = resolve_credentials(user, password, ntlm_hash, domain, creds_file, combo=combo)
-    stream_results = not json_out and not quiet
+    stream = not json_out and not quiet
     all_json_rows = []
-    multi_cred = len(creds) > 1
 
-    if multi_cred:
+    if len(creds) > 1:
+        # ── Phase 0: port probe ──
         reachable = probe_ports(target, selected)
-        if stream_results:
-            print_probe_summary(target, reachable, len(selected))
+        if stream:
+            print_probe_summary(target, reachable, len(selected), domain)
 
         if not reachable:
-            if stream_results:
-                from rich.console import Console
-                Console(stderr=True).print("[red][-][/red] no reachable ports — nothing to test")
+            if stream:
+                console.print("[red][-][/red] no reachable ports — nothing to test")
             return
 
         anchor = next((p for p in ANCHOR_PRIORITY if p in reachable), reachable[0])
         remaining = [p for p in reachable if p != anchor]
 
-        if stream_results:
-            from .output import console as out_console
-            out_console.print(f"  [dim]anchor: {anchor.upper()} — validating {len(creds)} credentials[/dim]\n")
+        # ── Phase 1: anchor validation ──
+        if stream:
+            console.print(f"  [dim]anchor: {anchor.upper()} — validating {len(creds)} credentials[/dim]\n")
 
         valid_creds = []
+        all_anchor_results = []
         for cred in creds:
             anchor_result = test_protocol(
                 target, anchor, cred, timeout, retries,
@@ -299,21 +302,17 @@ def main(
                 kerberos=kerberos, kdc_host=kdc_host,
                 debug=debug, delay=delay,
             )
-            if stream_results:
-                print_anchor_result(cred.user, domain, anchor, anchor_result.ok, anchor_result.proof)
+            all_anchor_results.append((cred, anchor_result))
+            if stream:
+                print_anchor_result(cred, anchor, anchor_result.ok, anchor_result.proof)
             if anchor_result.ok:
                 valid_creds.append((cred, anchor_result))
 
         if not valid_creds:
-            if stream_results:
-                from .output import console as out_console
-                out_console.print(f"\n  [dim]0/{len(creds)} credentials valid — skipping full scan[/dim]\n")
+            if stream:
+                console.print(f"\n  [dim]0/{len(creds)} credentials valid — skipping full scan[/dim]\n")
             if json_out:
-                for cred in creds:
-                    anchor_result = test_protocol(
-                        target, anchor, cred, timeout, 0,
-                        local_auth=local_auth, kerberos=kerberos, kdc_host=kdc_host,
-                    )
+                for cred, anchor_result in all_anchor_results:
                     all_json_rows.append({
                         "target": target,
                         "user": cred.user,
@@ -323,30 +322,22 @@ def main(
                 typer.echo(json.dumps(all_json_rows if len(all_json_rows) != 1 else all_json_rows[0], indent=2))
             return
 
-        if stream_results:
-            from .output import console as out_console
-            out_console.print(f"\n  [dim]{len(valid_creds)}/{len(creds)} valid — scanning {len(remaining)} remaining protocols[/dim]")
+        if stream:
+            console.print(f"\n  [dim]{len(valid_creds)}/{len(creds)} valid — scanning {len(remaining)} remaining protocols[/dim]")
 
+        # ── Phase 2: full scan for valid creds ──
         for cred, anchor_result in valid_creds:
-            if stream_results:
-                print_scan_header(target, cred.user, domain, len(reachable))
+            if stream:
+                print_scan_header(target, cred, domain, len(reachable))
                 print_result_event(anchor_result, verbose=verbose)
 
-            if remaining:
-                def make_on_result():
-                    def handler(res):
-                        print_result_event(res, verbose=verbose)
-                    return handler
-
-                extra_results = run_check(
-                    target, cred, remaining, timeout, retries, threads,
-                    local_auth=local_auth, try_local=try_local,
-                    kerberos=kerberos, kdc_host=kdc_host,
-                    debug=debug, delay=delay,
-                    on_result=make_on_result() if stream_results else None,
-                )
-            else:
-                extra_results = []
+            extra_results = run_check(
+                target, cred, remaining, timeout, retries, threads,
+                local_auth=local_auth, try_local=try_local,
+                kerberos=kerberos, kdc_host=kdc_host,
+                debug=debug, delay=delay,
+                on_result=_make_stream_handler(verbose) if stream else None,
+            ) if remaining else []
 
             all_results = [anchor_result] + extra_results
 
@@ -361,25 +352,21 @@ def main(
                     "domain": domain,
                     "results": [r.public_dict(raw=raw) for r in all_results],
                 })
-            elif not stream_results:
+            elif not stream:
                 print_results(target, cred.user, all_results, quiet=quiet, verbose=verbose)
 
     else:
+        # ── Single credential: full scan ──
         cred = creds[0]
-        if stream_results:
-            print_scan_header(target, cred.user, domain, len(selected))
-
-        def make_on_result():
-            def handler(res):
-                print_result_event(res, verbose=verbose)
-            return handler
+        if stream:
+            print_scan_header(target, cred, domain, len(selected))
 
         results = run_check(
             target, cred, selected, timeout, retries, threads,
             local_auth=local_auth, try_local=try_local,
             kerberos=kerberos, kdc_host=kdc_host,
             debug=debug, delay=delay,
-            on_result=make_on_result() if stream_results else None,
+            on_result=_make_stream_handler(verbose) if stream else None,
         )
 
         if save:
@@ -393,7 +380,7 @@ def main(
                 "domain": domain,
                 "results": [r.public_dict(raw=raw) for r in results],
             })
-        elif not stream_results:
+        elif not stream:
             print_results(target, cred.user, results, quiet=quiet, verbose=verbose)
 
     if json_out:
