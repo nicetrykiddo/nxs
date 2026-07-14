@@ -57,6 +57,8 @@ def read_file_or_value(value: str) -> list[str]:
             line.strip() for line in path.read_text(encoding="utf-8", errors="ignore").splitlines()
             if line.strip() and not line.startswith("#")
         ]
+    if path.suffix.lower() in {".txt", ".lst", ".list", ".csv", ".tsv", ".conf", ".cfg"}:
+        raise typer.BadParameter(f"file not found: {value}")
     return [value]
 
 
