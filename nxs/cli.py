@@ -273,7 +273,7 @@ def main(
     raw: bool = typer.Option(False, "--raw", help="Include raw nxc output in JSON"),
     quiet: bool = typer.Option(False, "-q", "--quiet", help="Only print valid protocols"),
     save: Optional[Path] = typer.Option(None, "--save", help="Save raw proof output to directory"),
-    timeout: int = typer.Option(30, "--timeout", help="Per-command timeout in seconds"),
+    timeout: int = typer.Option(60, "--timeout", help="Per-command timeout in seconds"),
     retries: int = typer.Option(1, "--retries", help="Retries for unclear responses"),
     threads: int = typer.Option(5, "-t", "--threads", help="Protocol worker threads"),
     delay: float = typer.Option(0.0, "--delay", help="Delay between retries in seconds"),

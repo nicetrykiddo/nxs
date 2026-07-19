@@ -342,7 +342,7 @@ def test_protocol(
     target: str,
     protocol: str,
     cred: Credential,
-    timeout: int = 30,
+    timeout: int = 60,
     retries: int = 1,
     local_auth: bool = False,
     try_local: bool = False,
@@ -366,20 +366,8 @@ def test_protocol(
             if delay and attempt:
                 time.sleep(delay)
 
-            cmd_args = []
-            if protocol == "smb":
-                cmd_args = ["--shares"]
-            elif protocol == "ldap":
-                cmd_args = ["--users"]
-            elif protocol == "ssh":
-                cmd_args = ["-x", "id; uname -a; cat /etc/os-release | grep PRETTY_NAME"]
-            elif protocol == "winrm":
-                cmd_args = ["-x", "whoami & echo. & whoami /all"]
-            elif protocol == "wmi":
-                cmd_args = ["-x", "whoami"]
-                
             login = run_command(
-                build_cmd(nxc, protocol, target, cred, cmd_args, local_auth=mode, kerberos=kerberos, kdc_host=kdc_host),
+                build_cmd(nxc, protocol, target, cred, local_auth=mode, kerberos=kerberos, kdc_host=kdc_host),
                 timeout,
                 debug,
                 env=ccache_env,
@@ -398,11 +386,47 @@ def test_protocol(
             level, proof = "AUTH", "auth ok"
 
             if protocol == "smb":
-                level, proof = smb_capability(login.output)
+                shares = run_command(
+                    build_cmd(nxc, protocol, target, cred, ["--shares"], mode, kerberos, kdc_host),
+                    timeout,
+                    debug,
+                    env=ccache_env,
+                )
+                all_records.append(shares)
+
+                share_ok, _ = auth_state(shares.output, cred.user, "", "")
+                if share_ok:
+                    level, proof = smb_capability(shares.output)
+
             elif protocol == "ldap":
-                level, proof = ldap_capability(login.output)
+                users = run_command(
+                    build_cmd(nxc, protocol, target, cred, ["--users"], mode, kerberos, kdc_host),
+                    timeout,
+                    debug,
+                    env=ccache_env,
+                )
+                all_records.append(users)
+
+                ldap_ok, _ = auth_state(users.output, cred.user, "", "")
+                if ldap_ok:
+                    level, proof = ldap_capability(users.output)
+
             elif protocol in {"ssh", "winrm", "wmi"}:
-                level, proof = exec_capability(login.output)
+                if protocol == "ssh":
+                    cmd_args = ["-x", "id; uname -a; cat /etc/os-release | grep PRETTY_NAME"]
+                elif protocol == "winrm":
+                    cmd_args = ["-x", "whoami & echo. & whoami /all"]
+                else:
+                    cmd_args = ["-x", "whoami"]
+                
+                exec_check = run_command(
+                    build_cmd(nxc, protocol, target, cred, cmd_args, mode, kerberos, kdc_host),
+                    timeout,
+                    debug,
+                    env=ccache_env,
+                )
+                all_records.append(exec_check)
+                level, proof = exec_capability(exec_check.output)
 
             return ProtocolResult(protocol, True, level, proof, "local" if mode else "domain", all_records)
 
