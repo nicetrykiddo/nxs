@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nxs"
-version = "0.3.1"
+version = "0.3.2"
 description = "Credential capability mapping for NetExec"
 readme = "README.md"
 requires-python = ">=3.10"
