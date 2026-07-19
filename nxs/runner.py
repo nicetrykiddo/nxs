@@ -312,7 +312,7 @@ def exec_capability(output: str) -> tuple[str, str]:
                 continue
             if capture and line.strip():
                 out = line.strip()
-                match = re.match(r"^[A-Za-z]+\s+[a-fA-F0-9\.\:]+\s+\d+\s+\S+\s+(.*)", out)
+                match = re.match(r"^[A-Za-z]+\s+[a-zA-Z0-9\.\:\-]+\s+\d+\s+\S+\s+(.*)", out)
                 if match:
                     out = match.group(1).strip()
                 return "EXEC", out
