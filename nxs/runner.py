@@ -224,10 +224,29 @@ def auth_state(output: str, user: str, target: str, protocol: str) -> tuple[bool
     if success_lines:
         return True, "auth ok"
 
-    if any(user_low in line.lower() for line in failure_lines):
-        return False, "auth failed"
+    def _extract_reason(line: str) -> str:
+        if "[-]" in line:
+            msg = line.split("[-]", 1)[1].strip()
+            
+            # Split out words to check if the first one is the username
+            parts = msg.split()
+            if parts:
+                first_word = parts[0].lower()
+                # The username might have a domain prefix: DOMAIN\user
+                if user_low in first_word or first_word in user_low:
+                    msg = " ".join(parts[1:])
+                    # Clean up Kerberos ccache specific clutter
+                    if msg.startswith("from ccache "):
+                        msg = msg[12:]
+            return msg
+        return "auth failed"
+
+    for line in failure_lines:
+        if user_low in line.lower():
+            return False, _extract_reason(line)
+            
     if failure_lines:
-        return False, "auth failed"
+        return False, _extract_reason(failure_lines[0])
 
     return None, "no clear auth result"
 
