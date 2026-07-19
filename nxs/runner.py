@@ -64,7 +64,15 @@ def find_nxc() -> str:
     return path
 
 
-def run_command(command: list[str], timeout: int, debug: bool = False, env: dict | None = None) -> CommandRecord:
+def run_command(
+    command: list[str],
+    timeout: int,
+    debug: bool = False,
+    env: dict | None = None,
+    remote_time: str | None = None,
+) -> CommandRecord:
+    if remote_time and shutil.which("faketime"):
+        command = ["faketime", remote_time] + command
     if debug:
         print("[debug]", " ".join(command))
     try:
@@ -339,6 +347,43 @@ def save_records(save_dir: Path, target: str, user: str, result: ProtocolResult)
         )
 
 
+def get_remote_time(target: str) -> str | None:
+    # Try net time -S target
+    net = shutil.which("net")
+    if net:
+        try:
+            res = subprocess.run([net, "time", "-S", target], capture_output=True, text=True, timeout=5)
+            if res.returncode == 0 and res.stdout.strip():
+                # Parse with date -d
+                date_cmd = shutil.which("date")
+                if date_cmd:
+                    parsed = subprocess.run([date_cmd, "-d", res.stdout.strip(), "+%Y-%m-%d %H:%M:%S"], capture_output=True, text=True, timeout=3)
+                    if parsed.returncode == 0 and parsed.stdout.strip():
+                        return parsed.stdout.strip()
+        except Exception:
+            pass
+
+    # Try ntpdate -q target as fallback
+    ntpdate = shutil.which("ntpdate")
+    if ntpdate:
+        try:
+            res = subprocess.run([ntpdate, "-q", target], capture_output=True, text=True, timeout=5)
+            # Find offset
+            import re
+            for line in res.stdout.splitlines():
+                match = re.search(r"offset\s+([-+]?\d+\.\d+)", line)
+                if match:
+                    offset = float(match.group(1))
+                    # Calculate remote time
+                    import datetime
+                    remote_dt = datetime.datetime.now() + datetime.timedelta(seconds=offset)
+                    return remote_dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+
+    return None
+
+
 def test_protocol(
     target: str,
     protocol: str,
@@ -351,6 +396,7 @@ def test_protocol(
     kdc_host: str | None = None,
     debug: bool = False,
     delay: float = 0.0,
+    remote_time: str | None = None,
 ) -> ProtocolResult:
     nxc = find_nxc()
     ccache_env = {**os.environ, "KRB5CCNAME": str(cred.ccache_file)} if cred.ccache_file else None
@@ -372,6 +418,7 @@ def test_protocol(
                 timeout,
                 debug,
                 env=ccache_env,
+                remote_time=remote_time,
             )
 
             all_records.append(login)
@@ -392,6 +439,7 @@ def test_protocol(
                     timeout,
                     debug,
                     env=ccache_env,
+                    remote_time=remote_time,
                 )
                 all_records.append(shares)
 
@@ -405,6 +453,7 @@ def test_protocol(
                     timeout,
                     debug,
                     env=ccache_env,
+                    remote_time=remote_time,
                 )
                 all_records.append(users)
 
@@ -425,6 +474,7 @@ def test_protocol(
                     timeout,
                     debug,
                     env=ccache_env,
+                    remote_time=remote_time,
                 )
                 all_records.append(exec_check)
                 level, proof = exec_capability(exec_check.output)

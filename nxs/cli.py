@@ -24,7 +24,7 @@ from .output import (
     print_scan_header,
 )
 from .profiles import ANCHOR_PRIORITY, SUPPORTED_PROTOCOLS
-from .runner import kill_all_procs, probe_ports, save_records, test_protocol
+from .runner import get_remote_time, kill_all_procs, probe_ports, save_records, test_protocol
 from .ticket import discover_tickets
 
 class NxsTyper(typer.Typer):
@@ -225,6 +225,7 @@ def run_check(
     debug: bool = False,
     delay: float = 0.0,
     on_result=None,
+    remote_time: Optional[str] = None,
 ):
     results = []
 
@@ -234,7 +235,7 @@ def run_check(
                 test_protocol, target, protocol, cred, timeout, retries,
                 local_auth=local_auth, try_local=try_local,
                 kerberos=kerberos, kdc_host=kdc_host,
-                debug=debug, delay=delay,
+                debug=debug, delay=delay, remote_time=remote_time,
             )
             for protocol in protocols
         ]
@@ -317,11 +318,58 @@ def main(
     stream = not json_out and not quiet
     all_json_rows = []
 
+    import shutil
+    remote_time = None
+    skew_msg = None
+    if kerberos or ticket:
+        time_target = kdc_host or target
+        if "/" not in time_target and not Path(time_target).exists():
+            remote_time = get_remote_time(time_target)
+            if remote_time:
+                import datetime
+                try:
+                    remote_dt = datetime.datetime.strptime(remote_time, "%Y-%m-%d %H:%M:%S")
+                    local_dt = datetime.datetime.now()
+                    offset_sec = int((remote_dt - local_dt).total_seconds())
+                    
+                    abs_offset = abs(offset_sec)
+                    if abs_offset < 60:
+                        offset_str = f"{offset_sec}s"
+                    elif abs_offset < 3600:
+                        offset_str = f"{offset_sec // 60}m {abs_offset % 60}s"
+                    else:
+                        offset_str = f"{offset_sec // 3600}h {(abs_offset % 3600) // 60}m"
+                    
+                    has_faketime = shutil.which("faketime") is not None
+                    
+                    if abs_offset >= 300:
+                        if has_faketime:
+                            skew_msg = (
+                                f"  [dim][*] clock skew: {offset_str} (DC time: {remote_time}) — using faketime[/dim]\n"
+                            )
+                        else:
+                            skew_msg = (
+                                f"  [red][!][/red] [dim]critical clock skew of {offset_str} (DC time: {remote_time}), but [bold]faketime[/bold] is not installed. Kerberos auth will fail.[/dim]\n"
+                            )
+                            remote_time = None
+                    else:
+                        if has_faketime:
+                            if debug or abs_offset >= 5:
+                                skew_msg = (
+                                    f"  [dim][*] clock skew: {offset_str} (DC time: {remote_time}) — using faketime[/dim]\n"
+                                )
+                        else:
+                            remote_time = None
+                except Exception:
+                    pass
+
     if len(creds) > 1:
         # ── Phase 0: port probe ──
         reachable = probe_ports(target, selected)
         if stream:
             print_probe_summary(target, reachable, len(selected), domain)
+            if skew_msg:
+                console.print(skew_msg)
 
         if not reachable:
             if stream:
@@ -343,6 +391,7 @@ def main(
                 local_auth=local_auth, try_local=try_local,
                 kerberos=kerberos, kdc_host=kdc_host,
                 debug=debug, delay=delay,
+                remote_time=remote_time,
             )
             all_anchor_results.append((cred, anchor_result))
             if stream:
@@ -371,6 +420,8 @@ def main(
         for cred, anchor_result in valid_creds:
             if stream:
                 print_scan_header(target, cred, domain, len(reachable))
+                if skew_msg:
+                    console.print(skew_msg)
                 print_result_event(anchor_result, verbose=verbose)
 
             extra_results = run_check(
@@ -379,6 +430,7 @@ def main(
                 kerberos=kerberos, kdc_host=kdc_host,
                 debug=debug, delay=delay,
                 on_result=_make_stream_handler(verbose) if stream else None,
+                remote_time=remote_time,
             ) if remaining else []
 
             all_results = [anchor_result] + extra_results
@@ -402,6 +454,8 @@ def main(
         cred = creds[0]
         if stream:
             print_scan_header(target, cred, domain, len(selected))
+            if skew_msg:
+                console.print(skew_msg)
 
         results = run_check(
             target, cred, selected, timeout, retries, threads,
@@ -409,6 +463,7 @@ def main(
             kerberos=kerberos, kdc_host=kdc_host,
             debug=debug, delay=delay,
             on_result=_make_stream_handler(verbose) if stream else None,
+            remote_time=remote_time,
         )
 
         if save:
