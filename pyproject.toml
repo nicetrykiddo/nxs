@@ -3,7 +3,7 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "nxs"
+name = "nxsctl"
 version = "0.3.3"
 description = "Credential capability mapping for NetExec"
 readme = "README.md"

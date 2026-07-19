@@ -1,5 +1,7 @@
 # nxs
 
+[![PyPI version](https://img.shields.io/pypi/v/nxsctl.svg)](https://pypi.org/project/nxsctl/)
+
 > What can this cred actually do?
 
 `nxs` is a credential capability mapper powered by [NetExec](https://github.com/Pennyw0rth/NetExec). It takes a credential and checks it against 10 different protocols (SMB, LDAP, WMI, WinRM, SSH, RDP, MSSQL, FTP, VNC, NFS) to show you exactly what level of access you have on the target.
@@ -7,7 +9,7 @@
 ## Install
 
 ```bash
-pipx install git+https://github.com/nicetrykiddo/nxs.git
+pipx install nxsctl
 ```
 
 Requires [NetExec](https://github.com/Pennyw0rth/NetExec) (`nxc`) in PATH.

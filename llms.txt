@@ -1,0 +1,58 @@
+# nxsctl (nxs)
+
+`nxsctl` (run via the command `nxs`) is a credential capability mapper powered by NetExec (`nxc`). It takes a credential and validates it across all supported network protocols to determine the exact level of access.
+
+## CLI Usage
+
+```bash
+nxs <target> [options]
+```
+
+### Key Options:
+- `target`: Target IP, hostname, CIDR, or file.
+- `-u, --user`: Username or file of usernames.
+- `-p, --password`: Password or file of passwords.
+- `-H, --hash`: NTLM hash (LM:NT or NT).
+- `-f, --file`: File containing `user:pass` or `user:hash` credentials.
+- `-d, --domain`: Active Directory domain.
+- `-C, --combo`: Try all combinations of users and passwords/hashes.
+- `--protocols`: Comma-separated list of protocols to test (default: all supported).
+- `-t, --threads`: Thread pool size (default: 5).
+- `-k, --kerberos`: Use Kerberos authentication.
+- `-T, --ticket`: Kerberos ticket file/dir path.
+- `--save <dir>`: Save raw NetExec command execution records to a directory.
+- `--json`: Format output as JSON.
+- `--verbose, -V`: Output detailed command results.
+
+## Supported Protocols & Ports
+
+- **SMB** (445)
+- **LDAP** (389)
+- **WMI** (135)
+- **WinRM** (5985)
+- **SSH** (22)
+- **RDP** (3389)
+- **MSSQL** (1433)
+- **FTP** (21)
+- **VNC** (5900)
+- **NFS** (2049)
+
+## Access Level Classification
+
+The tool reports access capabilities in a prioritized hierarchy:
+
+| Level | Marker | Meaning |
+|---|---|---|
+| `ADMIN` | `[!]` | Full admin privileges (e.g., writable `ADMIN$` or `C$` shares on SMB). |
+| `EXEC` | `[+]` | Command execution capability verified successfully. |
+| `WRITE` | `[+]` | Write access to resources (e.g., writable non-admin SMB shares). |
+| `READ` | `[+]` | Read access to resources (e.g., share read access, LDAP domain user enumeration). |
+| `AUTH` | `[*]` | Successful authentication, but no further resource access or execution rights. |
+| `UNCLEAR` | `[?]` | Response was inconclusive or timed out. |
+| `NO` | `[-]` | Authentication failed or port closed. |
+
+## Internal Flow
+
+1. **Port Probing:** Prior to credential testing, the tool runs a multi-threaded TCP port check on the target to identify active protocol services. Only open ports are tested to minimize traffic and log noise.
+2. **Anchor Validation (Multi-Creds):** If spraying multiple credentials, the tool selects a high-priority "anchor" protocol (like SMB) to validate each credential first. Only credentials that authenticate successfully on the anchor are tested against the remaining protocols.
+3. **Execution Verification:** Protocols supporting execution (SSH, WinRM, WMI) are tested by running validation commands (`whoami`, `id`, etc.) to confirm `EXEC` rights.
