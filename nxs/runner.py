@@ -192,7 +192,8 @@ def probe_ports(target: str, protocols: list[str], timeout: int = 5) -> list[str
         for line in result.stdout.splitlines():
             for port, proto in port_to_proto.items():
                 if f"{port}/tcp" in line and "open" in line and "filtered" not in line:
-                    reachable.append(proto)
+                    if proto not in reachable:
+                        reachable.append(proto)
         return reachable
     except Exception:
         return protocols[:]
@@ -415,7 +416,7 @@ def test_protocol(
                 if protocol == "ssh":
                     cmd_args = ["-x", "id; uname -a; cat /etc/os-release | grep PRETTY_NAME"]
                 elif protocol == "winrm":
-                    cmd_args = ["-x", "whoami & echo. & whoami /all"]
+                    cmd_args = ["-x", 'cmd /c "whoami & echo. & whoami /all"']
                 else:
                     cmd_args = ["-x", "whoami"]
                 

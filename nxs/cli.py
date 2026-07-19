@@ -102,7 +102,13 @@ def normalize_hash(value: str) -> str:
 
 def parse_protocols(protocols: Optional[str]) -> list[str]:
     if protocols:
-        selected = [p.strip().lower() for p in protocols.split(",") if p.strip()]
+        seen = set()
+        selected = []
+        for p in protocols.split(","):
+            p_clean = p.strip().lower()
+            if p_clean and p_clean not in seen:
+                seen.add(p_clean)
+                selected.append(p_clean)
     else:
         selected = SUPPORTED_PROTOCOLS[:]
 
