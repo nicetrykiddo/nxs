@@ -4,7 +4,9 @@ import getpass
 import itertools
 import json
 import re
+import signal
 import sys
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
@@ -22,7 +24,8 @@ from .output import (
     print_scan_header,
 )
 from .profiles import ANCHOR_PRIORITY, SUPPORTED_PROTOCOLS
-from .runner import probe_ports, save_records, test_protocol
+from .runner import kill_all_procs, probe_ports, save_records, test_protocol
+from .ticket import discover_tickets
 
 class NxsTyper(typer.Typer):
     def __call__(self, *args, **kwargs):
@@ -36,6 +39,15 @@ app = NxsTyper(
     no_args_is_help=False,
     add_completion=False,
 )
+
+_shutdown_event = threading.Event()
+
+
+def _sigint_handler(signum, frame):
+    _shutdown_event.set()
+    kill_all_procs()
+    console.print("\n  [dim]interrupted[/dim]")
+    sys.exit(130)
 
 EMPTY_LM = "aad3b435b51404eeaad3b435b51404ee"
 HEX32_RE = re.compile(r"^[0-9a-fA-F]{32}$")
@@ -222,6 +234,9 @@ def run_check(
         ]
 
         for future in as_completed(futures):
+            if _shutdown_event.is_set():
+                executor.shutdown(wait=False, cancel_futures=True)
+                break
             result = future.result()
             results.append(result)
             if on_result:
@@ -245,6 +260,7 @@ def main(
     user: Optional[str] = typer.Option(None, "-u", "--user", help="Username or file with usernames"),
     password: Optional[str] = typer.Option(None, "-p", "--password", help="Password or file with passwords"),
     ntlm_hash: Optional[str] = typer.Option(None, "-H", "--hash", help="NTLM hash or file with hashes"),
+    ticket: Optional[str] = typer.Option(None, "-T", "--ticket", help="Kerberos ccache file or directory of tickets"),
     domain: Optional[str] = typer.Option(None, "-d", "--domain", help="Domain"),
     combo: bool = typer.Option(False, "-C", "--combo", help="Try all user×password combinations"),
     opsec: bool = typer.Option(False, "--opsec", help="Single-threaded, low retry"),
@@ -266,12 +282,32 @@ def main(
     version: bool = typer.Option(False, "-v", "--version", help="Show version", callback=version_callback, is_eager=True),
 ):
     """nxs — Stop guessing what your creds can do. Blasts your credentials across all protocols and maps out your exact access level."""
+    signal.signal(signal.SIGINT, _sigint_handler)
+
     selected = parse_protocols(protocols)
     if opsec:
         threads = 1
         retries = min(retries, 1)
 
-    creds = resolve_credentials(user, password, ntlm_hash, domain, creds_file, combo=combo)
+    # ── Ticket auth ──
+    if ticket:
+        if password or ntlm_hash or creds_file:
+            raise typer.BadParameter("-T/--ticket is mutually exclusive with -p, -H, -f")
+
+        tickets = discover_tickets(ticket)
+        kerberos = True
+
+        creds = []
+        for info in tickets:
+            cred_user = user or info.principal
+            cred_domain = domain or info.realm
+            creds.append(Credential(
+                user=cred_user,
+                domain=cred_domain,
+                ccache_file=info.path,
+            ))
+    else:
+        creds = resolve_credentials(user, password, ntlm_hash, domain, creds_file, combo=combo)
     stream = not json_out and not quiet
     all_json_rows = []
 

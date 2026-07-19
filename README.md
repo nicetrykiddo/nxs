@@ -59,6 +59,12 @@ Kerberos:
 
 ```bash
 nxs 10.10.10.10 -u john.doe -p 'Password123' -d domain.local -k --kdc-host dc01.domain.local
+
+# Authenticate with a ccache ticket file (no password needed):
+nxs 10.10.10.10 -T user.ccache
+
+# Scan a directory of tickets:
+nxs 10.10.10.10 -T ./tickets/
 ```
 
 JSON output:

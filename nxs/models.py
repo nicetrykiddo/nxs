@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 
@@ -10,6 +11,7 @@ class Credential:
     password: str | None = None
     ntlm_hash: str | None = None
     domain: str | None = None
+    ccache_file: Path | None = None
 
 
 @dataclass

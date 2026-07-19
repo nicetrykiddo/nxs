@@ -50,6 +50,8 @@ LEVEL_MARK = {
 
 def cred_label(cred: Credential) -> str:
     """Format credential for display: user:secret."""
+    if cred.ccache_file:
+        return f"{cred.user} [ticket]"
     if cred.ntlm_hash:
         return f"{cred.user}:{cred.ntlm_hash}"
     if cred.password:

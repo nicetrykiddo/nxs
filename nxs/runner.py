@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -34,6 +36,19 @@ def strip_ansi(text: str) -> str:
     return ANSI_RE.sub("", text or "")
 
 
+_active_procs: set[subprocess.Popen] = set()
+_proc_lock = threading.Lock()
+
+
+def kill_all_procs() -> None:
+    with _proc_lock:
+        for proc in _active_procs:
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+
 _nxc_cache: str | None = None
 
 def find_nxc() -> str:
@@ -49,28 +64,41 @@ def find_nxc() -> str:
     return path
 
 
-def run_command(command: list[str], timeout: int, debug: bool = False) -> CommandRecord:
+def run_command(command: list[str], timeout: int, debug: bool = False, env: dict | None = None) -> CommandRecord:
     if debug:
         print("[debug]", " ".join(command))
     try:
-        proc = subprocess.run(command, text=True, capture_output=True, timeout=timeout)
-        output = strip_ansi((proc.stdout or "") + (proc.stderr or ""))
+        proc = subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
+        with _proc_lock:
+            _active_procs.add(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+            return CommandRecord(command[:], 124, "TIMEOUT")
+        finally:
+            with _proc_lock:
+                _active_procs.discard(proc)
+        output = strip_ansi((stdout or "") + (stderr or ""))
         return CommandRecord(command[:], proc.returncode, output)
-    except subprocess.TimeoutExpired:
-        return CommandRecord(command[:], 124, "TIMEOUT")
+    except OSError as e:
+        return CommandRecord(command[:], 1, str(e))
 
 
 def auth_args(cred: Credential, kerberos: bool = False, kdc_host: str | None = None) -> list[str]:
     args = ["-u", cred.user]
 
-    if cred.ntlm_hash:
+    if cred.ccache_file:
+        args += ["--use-kcache"]
+    elif cred.ntlm_hash:
         args += ["-H", cred.ntlm_hash]
     else:
         args += ["-p", cred.password or ""]
 
     if cred.domain:
         args += ["-d", cred.domain]
-    if kerberos:
+    if kerberos or cred.ccache_file:
         args += ["-k"]
     if kdc_host:
         args += ["--kdcHost", kdc_host]
@@ -302,6 +330,7 @@ def test_protocol(
     delay: float = 0.0,
 ) -> ProtocolResult:
     nxc = find_nxc()
+    ccache_env = {**os.environ, "KRB5CCNAME": str(cred.ccache_file)} if cred.ccache_file else None
     modes = [local_auth]
 
     if try_local and not local_auth and protocol in {"smb", "wmi"}:
@@ -319,6 +348,7 @@ def test_protocol(
                 build_cmd(nxc, protocol, target, cred, local_auth=mode, kerberos=kerberos, kdc_host=kdc_host),
                 timeout,
                 debug,
+                env=ccache_env,
             )
 
             all_records.append(login)
@@ -338,6 +368,7 @@ def test_protocol(
                     build_cmd(nxc, protocol, target, cred, ["--shares"], mode, kerberos, kdc_host),
                     timeout,
                     debug,
+                    env=ccache_env,
                 )
                 all_records.append(shares)
 
@@ -350,6 +381,7 @@ def test_protocol(
                     build_cmd(nxc, protocol, target, cred, ["--users"], mode, kerberos, kdc_host),
                     timeout,
                     debug,
+                    env=ccache_env,
                 )
                 all_records.append(users)
 
@@ -369,6 +401,7 @@ def test_protocol(
                     build_cmd(nxc, protocol, target, cred, cmd_args, mode, kerberos, kdc_host),
                     timeout,
                     debug,
+                    env=ccache_env,
                 )
                 all_records.append(exec_check)
                 level, proof = exec_capability(exec_check.output)
