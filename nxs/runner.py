@@ -161,6 +161,8 @@ def check_port_state(target: str, protocol: str) -> str:
                     return "port filtered"
                 elif "closed" in line:
                     return "port closed"
+                elif "open" in line:
+                    return "port open"
     except Exception:
         pass
 
@@ -207,9 +209,10 @@ def auth_state(output: str, user: str, target: str, protocol: str) -> tuple[bool
         if fail.lower() in low:
             return False, fail
 
-    if "nt_status_io_timeout" in low:
-        return False, "timeout"
-    if "timeout" in low:
+    if "nt_status_io_timeout" in low or "timeout" in low:
+        state = check_port_state(target, protocol)
+        if state in ("port closed", "port filtered", "port closed / filtered"):
+            return False, state
         return False, "timeout"
     if "connection refused" in low:
         return False, check_port_state(target, protocol)
