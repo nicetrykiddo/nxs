@@ -110,10 +110,16 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
     proto = result.protocol.lower()
     raw = "\n".join(r.output for r in result.records)
 
-    if proto == "smb" and result.level in {"READ", "WRITE", "ADMIN"}:
-        for line in raw.splitlines():
-            if "READ" in line or "WRITE" in line:
-                details.append(clean_nxc_line(line))
+    if proto == "smb":
+        if result.level in {"READ", "WRITE", "ADMIN"}:
+            for line in raw.splitlines():
+                if "READ" in line or "WRITE" in line:
+                    details.append(clean_nxc_line(line))
+        elif result.level == "AUTH":
+            # Capture any timeouts or clear errors that happened during share enum
+            for line in raw.splitlines():
+                if "timeout" in line.lower() or "[-] " in line:
+                    details.append(clean_nxc_line(line))
     elif proto == "ldap" and result.level in {"READ", "WRITE"}:
         capture = False
         for line in raw.splitlines():
