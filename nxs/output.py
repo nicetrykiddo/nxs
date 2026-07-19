@@ -98,7 +98,7 @@ def print_anchor_result(cred: Credential, anchor: str, ok: bool, proof: str) -> 
 
 
 def clean_nxc_line(line: str) -> str:
-    match = re.match(r"^[A-Z]+\s+[0-9a-fA-F\.\\:]+\s+\d+\s+\S+\s+(.*)", line)
+    match = re.match(r"^[A-Za-z]+\s+[0-9a-zA-Z\.\\:\-]+\s+\d+\s+\S+\s+(.*)", line)
     return match.group(1).strip() if match else line.strip()
 
 
