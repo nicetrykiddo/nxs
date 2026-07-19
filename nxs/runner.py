@@ -323,8 +323,18 @@ def exec_capability(output: str) -> tuple[str, str]:
                 out = line.strip()
                 match = re.match(r"^[A-Za-z]+\s+[a-zA-Z0-9\.\:\-]+\s+\d+\s+\S+\s+(.*)", out)
                 if match:
-                    out = match.group(1).strip()
-                return "EXEC", out
+                    msg = match.group(1).strip()
+                else:
+                    msg = out
+
+                if msg.startswith(("[+]", "[-]", "[*]")) or "executed command" in msg.lower():
+                    continue
+
+                return "EXEC", msg
+
+        if "execute command failed" in low or "error executing" in low:
+            if "executed command" not in low:
+                return "AUTH", "auth ok, exec denied"
 
         return "EXEC", "command execution"
 
