@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import ipaddress
 import os
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from .models import CommandRecord, Credential, ProtocolResult
@@ -158,7 +161,7 @@ def check_port_state(target: str, protocol: str) -> str:
 
     try:
         result = subprocess.run(
-            [nmap, "-Pn", "-p", port, target],
+            [nmap, "-sT", "-Pn", "-p", port, target],
             capture_output=True,
             text=True,
             timeout=5
@@ -191,7 +194,7 @@ def probe_ports(target: str, protocols: list[str], timeout: int = 5) -> list[str
 
     try:
         result = subprocess.run(
-            [nmap, "-Pn", "-T4", "-p", ",".join(ports), target],
+            [nmap, "-sT", "-Pn", "-T4", "-p", ",".join(ports), target],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -205,6 +208,112 @@ def probe_ports(target: str, protocols: list[str], timeout: int = 5) -> list[str
         return reachable
     except Exception:
         return protocols[:]
+
+
+def resolve_targets(target_str: str) -> list[str]:
+    path = Path(target_str)
+    if path.is_file():
+        targets = []
+        for line in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#"):
+                targets.extend(resolve_targets(line))
+        return targets or [target_str]
+
+    if "/" in target_str:
+        try:
+            net = ipaddress.ip_network(target_str, strict=False)
+            return [str(ip) for ip in net.hosts()]
+        except ValueError:
+            return [target_str]
+
+    m = re.match(r"^((?:\d{1,3}\.){3})(\d{1,3})-(\d{1,3})$", target_str)
+    if m:
+        prefix, lo, hi = m.group(1), int(m.group(2)), int(m.group(3))
+        return [f"{prefix}{i}" for i in range(lo, hi + 1)]
+
+    m = re.match(r"^(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})-(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$", target_str)
+    if m:
+        try:
+            start = int(ipaddress.ip_address(m.group(1)))
+            end = int(ipaddress.ip_address(m.group(2)))
+            return [str(ipaddress.ip_address(i)) for i in range(start, end + 1)]
+        except ValueError:
+            pass
+
+    return [target_str]
+
+
+def probe_ports_per_target(targets: list[str], protocols: list[str], timeout: int = 10) -> dict[str, list[str]]:
+    nmap = shutil.which("nmap")
+    if not nmap:
+        return {t: protocols[:] for t in targets}
+
+    ports = [PORT_MAP[p] for p in protocols if p in PORT_MAP]
+    if not ports:
+        return {t: protocols[:] for t in targets}
+
+    port_to_proto = {PORT_MAP[p]: p for p in protocols if p in PORT_MAP}
+    effective_timeout = max(timeout, len(targets) * 3)
+
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("\n".join(targets))
+            tmp_path = f.name
+
+        try:
+            result = subprocess.run(
+                [nmap, "-sT", "-Pn", "-T4", "--open", "-p", ",".join(ports),
+                 "-oX", "-", "-iL", tmp_path],
+                capture_output=True, text=True, timeout=effective_timeout,
+            )
+        finally:
+            os.unlink(tmp_path)
+
+        root = ET.fromstring(result.stdout)
+        result_map = {t: [] for t in targets}
+        target_set = set(targets)
+
+        for host in root.findall(".//host"):
+            status_el = host.find("status")
+            if status_el is not None and status_el.get("state") != "up":
+                continue
+
+            addr_el = host.find("address[@addrtype='ipv4']") or host.find("address")
+            if addr_el is None:
+                continue
+            ip = addr_el.get("addr", "")
+
+            matched = ip if ip in target_set else None
+            if not matched:
+                hostnames_el = host.find("hostnames")
+                if hostnames_el is not None:
+                    for hn in hostnames_el.findall("hostname"):
+                        name = hn.get("name", "")
+                        if name in target_set:
+                            matched = name
+                            break
+            if not matched:
+                matched = ip
+                if matched not in result_map:
+                    result_map[matched] = []
+
+            ports_el = host.find("ports")
+            if ports_el is None:
+                continue
+
+            for port_el in ports_el.findall("port"):
+                state_el = port_el.find("state")
+                if state_el is not None and state_el.get("state") == "open":
+                    portid = port_el.get("portid", "")
+                    if portid in port_to_proto:
+                        proto = port_to_proto[portid]
+                        if proto not in result_map[matched]:
+                            result_map[matched].append(proto)
+
+        return result_map
+    except Exception:
+        return {t: protocols[:] for t in targets}
 
 
 def auth_state(output: str, user: str, target: str, protocol: str) -> tuple[bool | None, str]:

@@ -9,6 +9,7 @@ import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeElapsedColumn, TimeRemainingColumn
 from typing import Optional
 
 import typer
@@ -24,7 +25,7 @@ from .output import (
     print_scan_header,
 )
 from .profiles import ANCHOR_PRIORITY, SUPPORTED_PROTOCOLS
-from .runner import get_remote_time, kill_all_procs, probe_ports, save_records, test_protocol
+from .runner import get_remote_time, kill_all_procs, probe_ports_per_target, resolve_targets, save_records, test_protocol
 from .ticket import discover_tickets
 
 class NxsTyper(typer.Typer):
@@ -318,11 +319,13 @@ def main(
     stream = not json_out and not quiet
     all_json_rows = []
 
+    targets = resolve_targets(target)
+
     import shutil
     remote_time = None
     skew_msg = None
     if kerberos or ticket:
-        time_target = kdc_host or target
+        time_target = kdc_host or targets[0]
         if "/" not in time_target and not Path(time_target).exists():
             remote_time = get_remote_time(time_target)
             if remote_time:
@@ -363,49 +366,91 @@ def main(
                 except Exception:
                     pass
 
+    if stream:
+        with console.status("[bold cyan]Probing ports...[/bold cyan]"):
+            port_map = probe_ports_per_target(targets, selected)
+        print_probe_summary(target, targets, port_map, selected, domain, verbose=verbose)
+        if skew_msg:
+            console.print(skew_msg)
+    else:
+        port_map = probe_ports_per_target(targets, selected)
+
+    _out_lock = threading.Lock()
+    target_workers = min(len(targets), 10)
+
     if len(creds) > 1:
-        # ── Phase 0: port probe ──
-        reachable = probe_ports(target, selected)
-        if stream:
-            print_probe_summary(target, reachable, len(selected), domain)
-            if skew_msg:
-                console.print(skew_msg)
-
-        if not reachable:
-            if stream:
-                console.print("[red][-][/red] no reachable ports — nothing to test")
-            return
-
-        anchor = next((p for p in ANCHOR_PRIORITY if p in reachable), reachable[0])
-        remaining = [p for p in reachable if p != anchor]
-
-        # ── Phase 1: anchor validation ──
-        if stream:
-            console.print(f"  [dim]anchor: {anchor.upper()} — validating {len(creds)} credentials[/dim]\n")
-
         valid_creds = []
         all_anchor_results = []
-        for cred in creds:
-            anchor_result = test_protocol(
-                target, anchor, cred, timeout, retries,
-                local_auth=local_auth, try_local=try_local,
-                kerberos=kerberos, kdc_host=kdc_host,
-                debug=debug, delay=delay,
-                remote_time=remote_time,
-            )
-            all_anchor_results.append((cred, anchor_result))
+
+        def _validate_one_target(t, progress=None, task_id=None):
+            target_protos = port_map.get(t, [])
+            if not target_protos:
+                return t, [], []
+
+            anchor = next((p for p in ANCHOR_PRIORITY if p in target_protos), target_protos[0])
+            remaining = [p for p in target_protos if p != anchor]
+
+            local_valid = []
+            local_anchor = []
+            for cred in creds:
+                anchor_result = test_protocol(
+                    t, anchor, cred, timeout, retries,
+                    local_auth=local_auth, try_local=try_local,
+                    kerberos=kerberos, kdc_host=kdc_host,
+                    debug=debug, delay=delay,
+                    remote_time=remote_time,
+                )
+                local_anchor.append((t, cred, anchor_result))
+                if anchor_result.ok:
+                    local_valid.append((t, cred, anchor_result, anchor, remaining))
+                if progress:
+                    progress.advance(task_id)
+
             if stream:
-                print_anchor_result(cred, anchor, anchor_result.ok, anchor_result.proof)
-            if anchor_result.ok:
-                valid_creds.append((cred, anchor_result))
+                with _out_lock:
+                    console.print(f"  [dim]{t} — anchor: {anchor.upper()} — validating {len(creds)} credentials[/dim]\n")
+                    for _, cr, ar in local_anchor:
+                        print_anchor_result(cr, anchor, ar.ok, ar.proof)
+                    console.print(f"  [dim]{len(local_valid)}/{len(creds)} valid on {t}[/dim]\n")
+
+            return t, local_valid, local_anchor
+
+        _anchor_progress = None
+        _anchor_task = None
+        if stream:
+            _anchor_progress = Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TimeElapsedColumn(),
+                TextColumn("·"),
+                TimeRemainingColumn(),
+                console=console,
+            )
+            _anchor_progress.start()
+            _anchor_task = _anchor_progress.add_task(
+                "Validating credentials",
+                total=len(targets) * len(creds),
+            )
+
+        with ThreadPoolExecutor(max_workers=target_workers) as executor:
+            futures = [executor.submit(_validate_one_target, t, _anchor_progress, _anchor_task) for t in targets]
+            for future in as_completed(futures):
+                t, local_valid, local_anchor = future.result()
+                valid_creds.extend(local_valid)
+                all_anchor_results.extend(local_anchor)
+
+        if _anchor_progress:
+            _anchor_progress.stop()
 
         if not valid_creds:
             if stream:
-                console.print(f"\n  [dim]0/{len(creds)} credentials valid — skipping full scan[/dim]\n")
+                console.print(f"\n  [dim]0/{len(all_anchor_results)} credential-target pairs valid — skipping full scan[/dim]\n")
             if json_out:
-                for cred, anchor_result in all_anchor_results:
+                for t, cred, anchor_result in all_anchor_results:
                     all_json_rows.append({
-                        "target": target,
+                        "target": t,
                         "user": cred.user,
                         "domain": domain,
                         "results": [anchor_result.public_dict(raw=raw)],
@@ -414,71 +459,139 @@ def main(
             return
 
         if stream:
-            console.print(f"\n  [dim]{len(valid_creds)}/{len(creds)} valid — scanning {len(remaining)} remaining protocols[/dim]")
+            console.print(f"\n  [dim]{len(valid_creds)}/{len(all_anchor_results)} valid — scanning remaining protocols[/dim]")
 
-        # ── Phase 2: full scan for valid creds ──
-        for cred, anchor_result in valid_creds:
-            if stream:
-                print_scan_header(target, cred, domain, len(reachable))
-                if skew_msg:
-                    console.print(skew_msg)
-                print_result_event(anchor_result, verbose=verbose)
-
+        def _scan_one_pair(pair):
+            t, cred, anchor_result, anchor, remaining = pair
             extra_results = run_check(
-                target, cred, remaining, timeout, retries, threads,
+                t, cred, remaining, timeout, retries, threads,
                 local_auth=local_auth, try_local=try_local,
                 kerberos=kerberos, kdc_host=kdc_host,
                 debug=debug, delay=delay,
-                on_result=_make_stream_handler(verbose) if stream else None,
                 remote_time=remote_time,
             ) if remaining else []
 
             all_results = [anchor_result] + extra_results
 
-            if save:
-                for result in all_results:
-                    save_records(save, target, cred.user, result)
+            if stream:
+                with _out_lock:
+                    print_scan_header(t, cred, domain, len(remaining) + 1)
+                    if skew_msg:
+                        console.print(skew_msg)
+                    print_result_event(anchor_result, verbose=verbose)
+                    for r in extra_results:
+                        print_result_event(r, verbose=verbose)
 
-            if json_out:
-                all_json_rows.append({
-                    "target": target,
-                    "user": cred.user,
-                    "domain": domain,
-                    "results": [r.public_dict(raw=raw) for r in all_results],
-                })
-            elif not stream:
-                print_results(target, cred.user, all_results, quiet=quiet, verbose=verbose)
+            return t, cred, all_results
+
+        _scan_progress = None
+        _scan_task = None
+        if stream:
+            _scan_progress = Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TimeElapsedColumn(),
+                TextColumn("·"),
+                TimeRemainingColumn(),
+                console=console,
+            )
+            _scan_progress.start()
+            _scan_task = _scan_progress.add_task(
+                "Scanning protocols",
+                total=len(valid_creds),
+            )
+
+        with ThreadPoolExecutor(max_workers=target_workers) as executor:
+            futures = [executor.submit(_scan_one_pair, pair) for pair in valid_creds]
+            for future in as_completed(futures):
+                t, cred, all_results = future.result()
+                if _scan_progress:
+                    _scan_progress.advance(_scan_task)
+
+                if save:
+                    for result in all_results:
+                        save_records(save, t, cred.user, result)
+
+                if json_out:
+                    all_json_rows.append({
+                        "target": t,
+                        "user": cred.user,
+                        "domain": domain,
+                        "results": [r.public_dict(raw=raw) for r in all_results],
+                    })
+                elif not stream:
+                    print_results(t, cred.user, all_results, quiet=quiet, verbose=verbose)
+
+        if _scan_progress:
+            _scan_progress.stop()
 
     else:
-        # ── Single credential: full scan ──
         cred = creds[0]
+
+        def _scan_single_target(t):
+            target_protos = port_map.get(t, selected)
+            results = run_check(
+                t, cred, target_protos, timeout, retries, threads,
+                local_auth=local_auth, try_local=try_local,
+                kerberos=kerberos, kdc_host=kdc_host,
+                debug=debug, delay=delay,
+                remote_time=remote_time,
+            )
+
+            if stream:
+                with _out_lock:
+                    print_scan_header(t, cred, domain, len(target_protos))
+                    if skew_msg:
+                        console.print(skew_msg)
+                    for r in results:
+                        print_result_event(r, verbose=verbose)
+
+            return t, results
+
+        _scan_progress = None
+        _scan_task = None
         if stream:
-            print_scan_header(target, cred, domain, len(selected))
-            if skew_msg:
-                console.print(skew_msg)
+            _scan_progress = Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
+                TimeElapsedColumn(),
+                TextColumn("·"),
+                TimeRemainingColumn(),
+                console=console,
+            )
+            _scan_progress.start()
+            _scan_task = _scan_progress.add_task(
+                "Scanning protocols",
+                total=len(targets),
+            )
 
-        results = run_check(
-            target, cred, selected, timeout, retries, threads,
-            local_auth=local_auth, try_local=try_local,
-            kerberos=kerberos, kdc_host=kdc_host,
-            debug=debug, delay=delay,
-            on_result=_make_stream_handler(verbose) if stream else None,
-            remote_time=remote_time,
-        )
+        with ThreadPoolExecutor(max_workers=target_workers) as executor:
+            futures = [executor.submit(_scan_single_target, t) for t in targets]
+            for future in as_completed(futures):
+                t, results = future.result()
+                if _scan_progress:
+                    _scan_progress.advance(_scan_task)
 
-        if save:
-            for result in results:
-                save_records(save, target, cred.user, result)
+                if save:
+                    for result in results:
+                        save_records(save, t, cred.user, result)
 
-        if json_out:
-            all_json_rows.append({
-                "target": target,
-                "user": cred.user,
-                "domain": domain,
-                "results": [r.public_dict(raw=raw) for r in results],
-            })
-        elif not stream:
-            print_results(target, cred.user, results, quiet=quiet, verbose=verbose)
+                if json_out:
+                    all_json_rows.append({
+                        "target": t,
+                        "user": cred.user,
+                        "domain": domain,
+                        "results": [r.public_dict(raw=raw) for r in results],
+                    })
+                elif not stream:
+                    print_results(t, cred.user, results, quiet=quiet, verbose=verbose)
+
+        if _scan_progress:
+            _scan_progress.stop()
 
     if json_out:
         typer.echo(json.dumps(all_json_rows[0] if len(all_json_rows) == 1 else all_json_rows, indent=2))

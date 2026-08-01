@@ -70,15 +70,37 @@ def print_scan_header(target: str, cred: Credential, domain: str | None, protoco
     )
 
 
-def print_probe_summary(target: str, reachable: list[str], total: int, domain: str | None = None) -> None:
-    names = ", ".join(p.upper() for p in reachable) if reachable else "none"
-    domain_str = f" · [dim]{domain}[/dim]" if domain else ""
-    console.print(
-        f"\n[dim]nxs v{__version__}[/dim]"
-        f" [bold]{target}[/bold]{domain_str}"
-        f" · [dim]probe: {len(reachable)}/{total} ports open[/dim]"
-        f" · [cyan]{names}[/cyan]\n"
-    )
+def print_probe_summary(raw_target: str, targets: list[str], port_map: dict[str, list[str]], all_protocols: list[str], domain: str | None = None, verbose: bool = False) -> None:
+    multi = len(targets) > 1
+    total = len(all_protocols)
+    reachable_targets = [t for t in targets if port_map.get(t)]
+
+    if multi:
+        domain_str = f" · [dim]{domain}[/dim]" if domain else ""
+        console.print(
+            f"\n[dim]nxs v{__version__}[/dim]"
+            f" [bold]{raw_target}[/bold] [dim]({len(targets)} targets)[/dim]{domain_str}"
+            f" · [dim]probe: {len(reachable_targets)}/{len(targets)} reachable[/dim]\n"
+        )
+        for t in targets:
+            protos = port_map.get(t, [])
+            if protos:
+                names = ", ".join(p.upper() for p in protos)
+                console.print(f"  [bold]{t}[/bold]  [dim]{len(protos)}/{total}[/dim]  [cyan]{names}[/cyan]")
+            elif verbose:
+                console.print(f"  [dim]{t}  0/{total}[/dim]")
+        console.print()
+    else:
+        t = targets[0]
+        protos = port_map.get(t, all_protocols)
+        names = ", ".join(p.upper() for p in protos) if protos else "none"
+        domain_str = f" · [dim]{domain}[/dim]" if domain else ""
+        console.print(
+            f"\n[dim]nxs v{__version__}[/dim]"
+            f" [bold]{t}[/bold]{domain_str}"
+            f" · [dim]probe: {len(protos)}/{total} ports open[/dim]"
+            f" · [cyan]{names}[/cyan]\n"
+        )
 
 
 def print_anchor_result(cred: Credential, anchor: str, ok: bool, proof: str) -> None:
