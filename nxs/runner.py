@@ -359,7 +359,7 @@ def auth_state(output: str, user: str, target: str, protocol: str) -> tuple[bool
                     # Clean up Kerberos ccache specific clutter
                     if msg.startswith("from ccache "):
                         msg = msg[12:]
-            return msg
+            return msg or "auth failed"
         return "auth failed"
 
     for line in failure_lines:

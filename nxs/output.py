@@ -139,9 +139,18 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
                     details.append(clean_nxc_line(line))
         elif result.level == "AUTH":
             # Capture any timeouts or clear errors that happened during share enum
+            # but filter internal nxc exception/traceback lines
             for line in raw.splitlines():
+                cleaned = clean_nxc_line(line)
+                if not cleaned:
+                    continue
+                # Skip internal nxc exception traces: "[HH:MM:SS] ERROR ..." or "filename.py:NNN"
+                if re.match(r"^\[?\d{2}:\d{2}:\d{2}\]?\s+ERROR", cleaned):
+                    continue
+                if re.match(r"^[a-z_]+\.py:\d+", cleaned):
+                    continue
                 if "timeout" in line.lower() or "[-] " in line:
-                    details.append(clean_nxc_line(line))
+                    details.append(cleaned)
     elif proto == "ldap" and result.level in {"READ", "WRITE"}:
         capture = False
         for line in raw.splitlines():
