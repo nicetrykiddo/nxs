@@ -35,6 +35,19 @@ nxs 10.10.10.10 -u john.doe -H LM_HASH:NT_HASH -d domain.local
 
 ## Quickstart
 
+IPv6-only hostnames (including `/etc/hosts`) are detected automatically. IPv4 is
+preferred for dual-stack hosts unless `-6` is explicitly requested.
+
+```bash
+nxs compatibility -u test -p 'pass@123'
+nxs compatibility -6 -u test -p 'pass@123'  # Force IPv6
+nxs dead:beef::1001 -u test -p 'pass@123'
+```
+
+Mixed IPv4 and IPv6 target files are scanned in separate Nmap runs. Nmap failures
+are reported instead of silently being treated as 0 open ports.
+
+
 ```bash
 nxs 10.10.10.10 -u admin -p 'Password123!'
 
