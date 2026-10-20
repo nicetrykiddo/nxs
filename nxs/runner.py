@@ -3,6 +3,7 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
+import socket
 import shutil
 import subprocess
 import tempfile
@@ -126,8 +127,9 @@ def build_cmd(
     local_auth: bool = False,
     kerberos: bool = False,
     kdc_host: str | None = None,
+    ipv6: bool = False,
 ) -> list[str]:
-    command = [nxc, protocol, target] + auth_args(cred, kerberos, kdc_host)
+    command = [nxc] + (["-6"] if ipv6 else []) + [protocol, target] + auth_args(cred, kerberos, kdc_host)
 
     if local_auth and protocol in {"smb", "wmi"}:
         command.append("--local-auth")
@@ -150,6 +152,39 @@ PORT_MAP = {
     "nfs": "2049",
 }
 
+class PortProbeError(RuntimeError):
+    """Port probe failed; do not report it as no open ports."""
+
+
+def target_addresses(target: str) -> dict[int, set[str]]:
+    """Use the system resolver, including /etc/hosts."""
+    addrs = {socket.AF_INET: set(), socket.AF_INET6: set()}
+    try:
+        addr = ipaddress.ip_address(target)
+    except ValueError:
+        pass
+    else:
+        family = socket.AF_INET6 if addr.version == 6 else socket.AF_INET
+        addrs[family].add(str(addr))
+        return addrs
+    try:
+        infos = socket.getaddrinfo(target, None, type=socket.SOCK_STREAM)
+    except (socket.gaierror, UnicodeError):
+        return addrs
+    for family, _, _, _, sockaddr in infos:
+        if family in addrs:
+            addrs[family].add(sockaddr[0])
+    return addrs
+
+
+def target_uses_ipv6(target: str, force_ipv6: bool = False) -> bool:
+    """Match NetExec: prefer IPv4 when both families resolve."""
+    if force_ipv6:
+        return True
+    addrs = target_addresses(target)
+    return not addrs[socket.AF_INET] and bool(addrs[socket.AF_INET6])
+
+
 def check_port_state(target: str, protocol: str) -> str:
     port = PORT_MAP.get(protocol)
     if not port:
@@ -161,7 +196,7 @@ def check_port_state(target: str, protocol: str) -> str:
 
     try:
         result = subprocess.run(
-            [nmap, "-sT", "-Pn", "-p", port, target],
+            [nmap] + (["-6"] if target_uses_ipv6(target) else []) + ["-sT", "-Pn", "-p", port, target],
             capture_output=True,
             text=True,
             timeout=5
@@ -194,7 +229,7 @@ def probe_ports(target: str, protocols: list[str], timeout: int = 5) -> list[str
 
     try:
         result = subprocess.run(
-            [nmap, "-sT", "-Pn", "-T4", "-p", ",".join(ports), target],
+            [nmap] + (["-6"] if target_uses_ipv6(target) else []) + ["-sT", "-Pn", "-T4", "-p", ",".join(ports), target],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -244,7 +279,13 @@ def resolve_targets(target_str: str) -> list[str]:
     return [target_str]
 
 
-def probe_ports_per_target(targets: list[str], protocols: list[str], timeout: int = 10) -> dict[str, list[str]]:
+def probe_ports_per_target(
+    targets: list[str],
+    protocols: list[str],
+    timeout: int = 10,
+    ipv6_targets: set[str] | None = None,
+) -> dict[str, list[str]]:
+    """Probe each IP family separately; correlate resolved IPs with input names."""
     nmap = shutil.which("nmap")
     if not nmap:
         return {t: protocols[:] for t in targets}
@@ -253,67 +294,71 @@ def probe_ports_per_target(targets: list[str], protocols: list[str], timeout: in
     if not ports:
         return {t: protocols[:] for t in targets}
 
+    if ipv6_targets is None:
+        ipv6_targets = {t for t in targets if target_uses_ipv6(t)}
     port_to_proto = {PORT_MAP[p]: p for p in protocols if p in PORT_MAP}
-    effective_timeout = max(timeout, len(targets) * 3)
+    result_map = {t: [] for t in targets}
 
-    try:
+    for family, group in (
+        (socket.AF_INET, [t for t in targets if t not in ipv6_targets]),
+        (socket.AF_INET6, [t for t in targets if t in ipv6_targets]),
+    ):
+        if not group:
+            continue
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-            f.write("\n".join(targets))
+            f.write("\n".join(group))
             tmp_path = f.name
-
         try:
-            result = subprocess.run(
-                [nmap, "-sT", "-Pn", "-T4", "--open", "-p", ",".join(ports),
-                 "-oX", "-", "-iL", tmp_path],
-                capture_output=True, text=True, timeout=effective_timeout,
-            )
+            cmd = [nmap] + (["-6"] if family == socket.AF_INET6 else [])
+            cmd += ["-sT", "-Pn", "-T4", "--open", "-p", ",".join(ports), "-oX", "-", "-iL", tmp_path]
+            try:
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True,
+                    timeout=max(timeout, len(group) * 3),
+                )
+            except subprocess.TimeoutExpired as exc:
+                raise PortProbeError("Nmap timed out while scanning targets") from exc
+            except OSError as exc:
+                raise PortProbeError(f"Unable to start Nmap: {exc}") from exc
         finally:
             os.unlink(tmp_path)
 
-        root = ET.fromstring(result.stdout)
-        result_map = {t: [] for t in targets}
-        target_set = set(targets)
+        if result.returncode != 0:
+            detail = (result.stderr or result.stdout).strip()
+            raise PortProbeError(detail or f"Nmap exited with status {result.returncode}")
+        try:
+            root = ET.fromstring(result.stdout)
+        except ET.ParseError as exc:
+            raise PortProbeError("Nmap returned invalid XML; port status is unknown") from exc
+
+        aliases: dict[str, set[str]] = {}
+        for target in group:
+            aliases.setdefault(target.lower(), set()).add(target)
+            for addr in target_addresses(target)[family]:
+                aliases.setdefault(addr.lower(), set()).add(target)
 
         for host in root.findall(".//host"):
-            status_el = host.find("status")
-            if status_el is not None and status_el.get("state") != "up":
+            status = host.find("status")
+            if status is not None and status.get("state") != "up":
                 continue
+            addrtype = "ipv6" if family == socket.AF_INET6 else "ipv4"
+            names = [el.get("addr", "").lower() for el in host.findall("address")
+                     if el.get("addrtype") == addrtype]
+            names += [el.get("name", "").lower() for el in host.findall("./hostnames/hostname")]
+            matched: set[str] = set()
+            for name in names:
+                matched.update(aliases.get(name, set()))
+            for port_el in host.findall("./ports/port"):
+                state = port_el.find("state")
+                if state is None or state.get("state") != "open":
+                    continue
+                proto = port_to_proto.get(port_el.get("portid", ""))
+                if proto:
+                    for target in matched:
+                        if proto not in result_map[target]:
+                            result_map[target].append(proto)
 
-            addr_el = host.find("address[@addrtype='ipv4']") or host.find("address")
-            if addr_el is None:
-                continue
-            ip = addr_el.get("addr", "")
-
-            matched = ip if ip in target_set else None
-            if not matched:
-                hostnames_el = host.find("hostnames")
-                if hostnames_el is not None:
-                    for hn in hostnames_el.findall("hostname"):
-                        name = hn.get("name", "")
-                        if name in target_set:
-                            matched = name
-                            break
-            if not matched:
-                matched = ip
-                if matched not in result_map:
-                    result_map[matched] = []
-
-            ports_el = host.find("ports")
-            if ports_el is None:
-                continue
-
-            for port_el in ports_el.findall("port"):
-                state_el = port_el.find("state")
-                if state_el is not None and state_el.get("state") == "open":
-                    portid = port_el.get("portid", "")
-                    if portid in port_to_proto:
-                        proto = port_to_proto[portid]
-                        if proto not in result_map[matched]:
-                            result_map[matched].append(proto)
-
-        return result_map
-    except Exception:
-        return {t: protocols[:] for t in targets}
+    return result_map
 
 
 def auth_state(output: str, user: str, target: str, protocol: str) -> tuple[bool | None, str]:
@@ -516,6 +561,7 @@ def test_protocol(
     debug: bool = False,
     delay: float = 0.0,
     remote_time: str | None = None,
+    ipv6: bool = False,
 ) -> ProtocolResult:
     nxc = find_nxc()
     ccache_env = {**os.environ, "KRB5CCNAME": str(cred.ccache_file)} if cred.ccache_file else None
@@ -533,7 +579,7 @@ def test_protocol(
                 time.sleep(delay)
 
             login = run_command(
-                build_cmd(nxc, protocol, target, cred, local_auth=mode, kerberos=kerberos, kdc_host=kdc_host),
+                build_cmd(nxc, protocol, target, cred, local_auth=mode, kerberos=kerberos, kdc_host=kdc_host, ipv6=ipv6),
                 timeout,
                 debug,
                 env=ccache_env,
@@ -554,7 +600,7 @@ def test_protocol(
 
             if protocol == "smb":
                 shares = run_command(
-                    build_cmd(nxc, protocol, target, cred, ["--shares"], mode, kerberos, kdc_host),
+                    build_cmd(nxc, protocol, target, cred, ["--shares"], mode, kerberos, kdc_host, ipv6=ipv6),
                     timeout,
                     debug,
                     env=ccache_env,
@@ -568,7 +614,7 @@ def test_protocol(
 
             elif protocol == "ldap":
                 users = run_command(
-                    build_cmd(nxc, protocol, target, cred, ["--users"], mode, kerberos, kdc_host),
+                    build_cmd(nxc, protocol, target, cred, ["--users"], mode, kerberos, kdc_host, ipv6=ipv6),
                     timeout,
                     debug,
                     env=ccache_env,
@@ -589,7 +635,7 @@ def test_protocol(
                     cmd_args = ["-x", "whoami"]
                 
                 exec_check = run_command(
-                    build_cmd(nxc, protocol, target, cred, cmd_args, mode, kerberos, kdc_host),
+                    build_cmd(nxc, protocol, target, cred, cmd_args, mode, kerberos, kdc_host, ipv6=ipv6),
                     timeout,
                     debug,
                     env=ccache_env,
