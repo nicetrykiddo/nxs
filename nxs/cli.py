@@ -25,7 +25,7 @@ from .output import (
     print_scan_header,
 )
 from .profiles import ANCHOR_PRIORITY, SUPPORTED_PROTOCOLS
-from .runner import get_remote_time, kill_all_procs, probe_ports_per_target, resolve_targets, save_records, test_protocol
+from .runner import PortProbeError, get_remote_time, kill_all_procs, probe_ports_per_target, resolve_targets, save_records, target_uses_ipv6, test_protocol
 from .ticket import discover_tickets
 
 class NxsTyper(typer.Typer):
@@ -227,6 +227,7 @@ def run_check(
     delay: float = 0.0,
     on_result=None,
     remote_time: Optional[str] = None,
+    ipv6: bool = False,
 ):
     results = []
 
@@ -237,6 +238,7 @@ def run_check(
                 local_auth=local_auth, try_local=try_local,
                 kerberos=kerberos, kdc_host=kdc_host,
                 debug=debug, delay=delay, remote_time=remote_time,
+                ipv6=ipv6,
             )
             for protocol in protocols
         ]
@@ -276,6 +278,7 @@ def main(
     local_auth: bool = typer.Option(False, "--local-auth", help="Local auth for SMB/WMI"),
     try_local: bool = typer.Option(False, "--try-local", help="Retry with --local-auth on unclear"),
     kerberos: bool = typer.Option(False, "-k", "--kerberos", help="Use Kerberos"),
+    ipv6: bool = typer.Option(False, "-6", "--ipv6", help="Force IPv6 (auto-detected for IPv6-only hosts)"),
     kdc_host: Optional[str] = typer.Option(None, "--kdc-host", help="KDC host for Kerberos"),
     json_out: bool = typer.Option(False, "--json", help="JSON output"),
     raw: bool = typer.Option(False, "--raw", help="Include raw nxc output in JSON"),
@@ -320,6 +323,7 @@ def main(
     all_json_rows = []
 
     targets = resolve_targets(target)
+    ipv6_targets = {t for t in targets if target_uses_ipv6(t, force_ipv6=ipv6)}
 
     import shutil
     remote_time = None
@@ -366,14 +370,18 @@ def main(
                 except Exception:
                     pass
 
-    if stream:
-        with console.status("[bold cyan]Probing ports...[/bold cyan]"):
-            port_map = probe_ports_per_target(targets, selected)
-        print_probe_summary(target, targets, port_map, selected, domain, verbose=verbose)
-        if skew_msg:
-            console.print(skew_msg)
-    else:
-        port_map = probe_ports_per_target(targets, selected)
+    try:
+        if stream:
+            with console.status("[bold cyan]Probing ports...[/bold cyan]"):
+                port_map = probe_ports_per_target(targets, selected, ipv6_targets=ipv6_targets)
+            print_probe_summary(target, targets, port_map, selected, domain, verbose=verbose)
+            if skew_msg:
+                console.print(skew_msg)
+        else:
+            port_map = probe_ports_per_target(targets, selected, ipv6_targets=ipv6_targets)
+    except PortProbeError as exc:
+        console.print(f"[red][-][/red] Port probe failed: {exc}", stderr=True)
+        raise typer.Exit(code=2)
 
     _out_lock = threading.Lock()
     target_workers = min(len(targets), 10)
@@ -399,6 +407,7 @@ def main(
                     kerberos=kerberos, kdc_host=kdc_host,
                     debug=debug, delay=delay,
                     remote_time=remote_time,
+                    ipv6=t in ipv6_targets,
                 )
                 local_anchor.append((t, cred, anchor_result))
                 if anchor_result.ok:
@@ -469,6 +478,7 @@ def main(
                 kerberos=kerberos, kdc_host=kdc_host,
                 debug=debug, delay=delay,
                 remote_time=remote_time,
+                ipv6=t in ipv6_targets,
             ) if remaining else []
 
             all_results = [anchor_result] + extra_results
@@ -538,6 +548,7 @@ def main(
                 kerberos=kerberos, kdc_host=kdc_host,
                 debug=debug, delay=delay,
                 remote_time=remote_time,
+                ipv6=t in ipv6_targets,
             )
 
             if stream:
