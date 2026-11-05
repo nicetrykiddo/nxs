@@ -134,7 +134,7 @@ def resolve_credentials(
     if creds_file:
         path = Path(creds_file)
         if not path.is_file():
-            if not user:
+            if user is None:
                 raise typer.BadParameter(f"File not found: '{creds_file}' (Did you forget the -u/--user flag?)")
             raise typer.BadParameter(f"creds file not found: {creds_file}")
 
@@ -156,15 +156,15 @@ def resolve_credentials(
             raise typer.BadParameter(f"no valid entries in creds file: {creds_file}")
         return creds
 
-    if not user:
+    if user is None:
         raise typer.BadParameter("Provide either a creds file or -u/--user")
 
-    if password and ntlm_hash:
+    if password is not None and ntlm_hash is not None:
         raise typer.BadParameter("use either --password or --hash, not both")
 
     users = read_file_or_value(user)
 
-    if ntlm_hash:
+    if ntlm_hash is not None:
         hashes = read_file_or_value(ntlm_hash)
         if combo:
             return [
@@ -185,7 +185,7 @@ def resolve_credentials(
             for u, h in zip(users, hashes)
         ]
 
-    if password:
+    if password is not None:
         passwords = read_file_or_value(password)
         if combo:
             return [
@@ -302,7 +302,7 @@ def main(
 
     # ── Ticket auth ──
     if ticket:
-        if password or ntlm_hash or creds_file:
+        if password is not None or ntlm_hash is not None or creds_file:
             raise typer.BadParameter("-T/--ticket is mutually exclusive with -p, -H, -f")
 
         tickets = discover_tickets(ticket)

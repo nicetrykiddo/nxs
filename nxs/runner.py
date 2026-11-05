@@ -385,7 +385,7 @@ def auth_state(output: str, user: str, target: str, protocol: str) -> tuple[bool
     success_lines = [line for line in output.splitlines() if "[+]" in line]
     failure_lines = [line for line in output.splitlines() if "[-]" in line]
 
-    if any(user_low in line.lower() for line in success_lines):
+    if user_low and any(user_low in line.lower() for line in success_lines):
         return True, "auth ok"
     if success_lines:
         return True, "auth ok"
@@ -399,7 +399,7 @@ def auth_state(output: str, user: str, target: str, protocol: str) -> tuple[bool
             if parts:
                 first_word = parts[0].lower()
                 # The username might have a domain prefix: DOMAIN\user
-                if user_low in first_word or first_word in user_low:
+                if user_low and (user_low in first_word or first_word in user_low):
                     msg = " ".join(parts[1:])
                     # Clean up Kerberos ccache specific clutter
                     if msg.startswith("from ccache "):
@@ -408,7 +408,7 @@ def auth_state(output: str, user: str, target: str, protocol: str) -> tuple[bool
         return "auth failed"
 
     for line in failure_lines:
-        if user_low in line.lower():
+        if user_low and user_low in line.lower():
             return False, _extract_reason(line)
             
     if failure_lines:
