@@ -65,8 +65,7 @@ def print_scan_header(target: str, cred: Credential, domain: str | None, protoco
     if domain:
         identity += f"@{domain}"
     console.print(
-        f"\n[dim]nxs v{__version__}[/dim]"
-        f" [bold]{target}[/bold] · {identity}"
+        f"\n[bold]{target}[/bold] · {identity}"
         f" · [dim]{protocol_count} protocols[/dim]\n"
     )
 
@@ -131,6 +130,19 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
         return details
 
     proto = result.protocol.lower()
+
+    def add(line: str) -> None:
+        if line and line not in details:
+            details.append(line)
+
+    # Authentication and service metadata are useful even when no capability was
+    # confirmed. Display each item once rather than repeating it for every NXC call.
+    for record in result.records:
+        for line in record.output.splitlines():
+            cleaned = clean_nxc_line(line).rstrip("\x00")
+            if cleaned.startswith(("[*] Windows", "[*] Linux", "[+]")):
+                add(cleaned)
+
     if proto == "smb":
         for record in result.records:
             if "--shares" in record.command and "Enumerated shares" in record.output:
@@ -142,29 +154,54 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
                         continue
                     if not started or not cleaned or cleaned.startswith(("Share", "---", "[", "SMB ")):
                         continue
-                    parts = cleaned.split(None, 1)
-                    if not parts:
-                        continue
-                    share = parts[0]
+                    cols = re.split(r"\s{2,}", cleaned, maxsplit=2)
+                    share = cols[0].strip()
                     if not re.fullmatch(r"[A-Za-z0-9._$-]+", share):
                         continue
-                    tail = parts[1] if len(parts) > 1 else ""
-                    perm = re.match(r"^(READ,WRITE|WRITE,READ|READ|WRITE)(?:\s|$)", tail)
-                    label = perm.group(1) if perm else "—"
-                    details.append(f"{share:<16} {label}")
+                    permission = ""
+                    remark = ""
+                    if len(cols) > 1:
+                        if cols[1] in {"READ", "WRITE", "READ,WRITE", "WRITE,READ"}:
+                            permission = cols[1]
+                            remark = cols[2] if len(cols) > 2 else ""
+                        else:
+                            remark = " ".join(cols[1:])
+                    add(f"{share:<16} {permission or '—':<10} {remark}".rstrip())
+
             elif "--dir" in record.command:
                 share = record.command[record.command.index("--share") + 1] if "--share" in record.command else "?"
-                details.append(f"{share}/ (root only)")
-                shown = 0
+                add(f"{share}/ (root only)")
+                found = False
                 for line in record.output.splitlines():
                     cleaned = clean_nxc_line(line).rstrip("\x00")
-                    if not cleaned or cleaned.startswith(("[*]", "[+]", "[-]")):
+                    # NetExec --dir returns: permissions, size, modified date, name.
+                    match = re.match(
+                        r"^([df][rw-]{3})\s+(\d+)\s+"
+                        r"([A-Za-z]{3}\s+[A-Za-z]{3}\s+\d{1,2}\s+"
+                        r"\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$",
+                        cleaned,
+                    )
+                    if not match:
                         continue
-                    if shown >= 50:
-                        details.append("  ... truncated after 50 entries")
-                        break
-                    details.append("  " + cleaned)
-                    shown += 1
+                    flags, size, stamp, name = match.groups()
+                    name = name.strip()
+                    if name in {".", ".."}:
+                        continue
+                    found = True
+                    kind = "dir" if flags.startswith("d") else "file"
+                    display_name = name + ("/" if kind == "dir" else "")
+                    from datetime import datetime
+                    try:
+                        modified = datetime.strptime(stamp, "%a %b %d %H:%M:%S %Y").strftime("%Y-%m-%d")
+                    except ValueError:
+                        modified = stamp
+                    detail = f"  {display_name}  · {kind}"
+                    if kind == "file":
+                        detail += f" · {int(size):,} B"
+                    add(f"{detail} · {modified}")
+                if not found:
+                    add("  no entries returned")
+
     elif proto == "ldap":
         for record in result.records:
             if "--users" not in record.command:
@@ -172,7 +209,8 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
             for line in record.output.splitlines():
                 cleaned = clean_nxc_line(line)
                 if "Enumerated" in cleaned:
-                    details.append(cleaned)
+                    add(cleaned)
+
     elif proto in {"ssh", "winrm", "wmi"}:
         for record in result.records:
             if "-x" not in record.command:
@@ -180,15 +218,13 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
             for line in record.output.splitlines():
                 cleaned = clean_nxc_line(line).rstrip("\x00")
                 if cleaned and not cleaned.startswith(("[*]", "[+]", "[-]")):
-                    details.append(cleaned)
+                    add(cleaned)
 
-    # Include the full source error even when the capability is NO or UNCLEAR.
+    # Never shorten an original NXC error. This applies to NO and UNCLEAR too.
     for record in result.records:
         for line in record.output.splitlines():
             if "[-]" in line:
-                cleaned = clean_nxc_line(line).rstrip("\x00")
-                if cleaned and cleaned not in details:
-                    details.append(cleaned)
+                add(clean_nxc_line(line).rstrip("\x00"))
 
     return details
 

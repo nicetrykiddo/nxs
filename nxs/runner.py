@@ -615,7 +615,7 @@ def test_protocol(
 
             if protocol == "smb":
                 shares = run_command(
-                    build_cmd(nxc, protocol, target, cred, ["--shares"] + (["--no-write-check"] if opsec else []), mode, kerberos, kdc_host, ipv6=ipv6),
+                    build_cmd(nxc, protocol, target, cred, ["--shares"], mode, kerberos, kdc_host, ipv6=ipv6),
                     timeout,
                     debug,
                     env=ccache_env,
