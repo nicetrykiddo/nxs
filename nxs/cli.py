@@ -25,7 +25,7 @@ from .output import (
     print_scan_header,
 )
 from .profiles import ANCHOR_PRIORITY, SUPPORTED_PROTOCOLS
-from .runner import PortProbeError, get_remote_time, kill_all_procs, probe_ports_per_target, resolve_targets, save_records, target_uses_ipv6, test_protocol
+from .runner import PortProbeError, configure_pacing, get_remote_time, kill_all_procs, probe_ports_per_target, resolve_targets, save_records, target_uses_ipv6, test_protocol
 from .ticket import discover_tickets
 
 class NxsTyper(typer.Typer):
@@ -212,6 +212,19 @@ def resolve_credentials(
     return [Credential(user=users[0], password=getpass.getpass("Password: "), domain=domain)]
 
 
+def _probe_targets(targets: list[str], protocols: list[str], ipv6_targets: set[str], opsec: bool) -> dict[str, list[str]]:
+    if not opsec:
+        return probe_ports_per_target(targets, protocols, ipv6_targets=ipv6_targets)
+    result = {}
+    for target in targets:
+        result.update(probe_ports_per_target(
+            [target], protocols,
+            ipv6_targets={target} if target in ipv6_targets else set(),
+            opsec=True,
+        ))
+    return result
+
+
 def run_check(
     target: str,
     cred: Credential,
@@ -228,6 +241,8 @@ def run_check(
     on_result=None,
     remote_time: Optional[str] = None,
     ipv6: bool = False,
+    opsec: bool = False,
+    list_files: bool = False,
 ):
     results = []
 
@@ -238,7 +253,7 @@ def run_check(
                 local_auth=local_auth, try_local=try_local,
                 kerberos=kerberos, kdc_host=kdc_host,
                 debug=debug, delay=delay, remote_time=remote_time,
-                ipv6=ipv6,
+                ipv6=ipv6, opsec=opsec, list_files=list_files,
             )
             for protocol in protocols
         ]
@@ -273,7 +288,8 @@ def main(
     ticket: Optional[str] = typer.Option(None, "-T", "--ticket", help="Kerberos ccache file or directory of tickets"),
     domain: Optional[str] = typer.Option(None, "-d", "--domain", help="Domain"),
     combo: bool = typer.Option(False, "-C", "--combo", help="Try all user×password combinations"),
-    opsec: bool = typer.Option(False, "--opsec", help="Single-threaded, low retry"),
+    opsec: bool = typer.Option(False, "--opsec", help="Sequential paced auth checks; skips automatic capability probes"),
+    list_files: bool = typer.Option(False, "--list-files", help="List root entries of readable SMB shares, no recursion"),
     protocols: Optional[str] = typer.Option(None, "--protocols", help=f"Comma list ({PROTOCOL_LIST})"),
     local_auth: bool = typer.Option(False, "--local-auth", help="Local auth for SMB/WMI"),
     try_local: bool = typer.Option(False, "--try-local", help="Retry with --local-auth on unclear"),
@@ -298,7 +314,9 @@ def main(
     selected = parse_protocols(protocols)
     if opsec:
         threads = 1
-        retries = min(retries, 1)
+        retries = 0
+        delay = max(delay, 1.5)
+    configure_pacing(delay)
 
     # ── Ticket auth ──
     if ticket:
@@ -373,18 +391,18 @@ def main(
     try:
         if stream:
             with console.status("[bold cyan]Probing ports...[/bold cyan]"):
-                port_map = probe_ports_per_target(targets, selected, ipv6_targets=ipv6_targets)
+                port_map = _probe_targets(targets, selected, ipv6_targets, opsec)
             print_probe_summary(target, targets, port_map, selected, domain, verbose=verbose)
             if skew_msg:
                 console.print(skew_msg)
         else:
-            port_map = probe_ports_per_target(targets, selected, ipv6_targets=ipv6_targets)
+            port_map = _probe_targets(targets, selected, ipv6_targets, opsec)
     except PortProbeError as exc:
         console.print(f"[red][-][/red] Port probe failed: {exc}", stderr=True)
         raise typer.Exit(code=2)
 
     _out_lock = threading.Lock()
-    target_workers = min(len(targets), 10)
+    target_workers = 1 if opsec else min(len(targets), 10)
 
     if len(creds) > 1:
         valid_creds = []
@@ -407,7 +425,7 @@ def main(
                     kerberos=kerberos, kdc_host=kdc_host,
                     debug=debug, delay=delay,
                     remote_time=remote_time,
-                    ipv6=t in ipv6_targets,
+                    ipv6=t in ipv6_targets, opsec=opsec, list_files=list_files,
                 )
                 local_anchor.append((t, cred, anchor_result))
                 if anchor_result.ok:
@@ -478,7 +496,7 @@ def main(
                 kerberos=kerberos, kdc_host=kdc_host,
                 debug=debug, delay=delay,
                 remote_time=remote_time,
-                ipv6=t in ipv6_targets,
+                ipv6=t in ipv6_targets, opsec=opsec, list_files=list_files,
             ) if remaining else []
 
             all_results = [anchor_result] + extra_results
@@ -488,9 +506,9 @@ def main(
                     print_scan_header(t, cred, domain, len(remaining) + 1)
                     if skew_msg:
                         console.print(skew_msg)
-                    print_result_event(anchor_result, verbose=verbose)
+                    print_result_event(anchor_result, verbose=verbose or (list_files and anchor_result.protocol == "smb"))
                     for r in extra_results:
-                        print_result_event(r, verbose=verbose)
+                        print_result_event(r, verbose=verbose or (list_files and r.protocol == "smb"))
 
             return t, cred, all_results
 
@@ -548,7 +566,7 @@ def main(
                 kerberos=kerberos, kdc_host=kdc_host,
                 debug=debug, delay=delay,
                 remote_time=remote_time,
-                ipv6=t in ipv6_targets,
+                ipv6=t in ipv6_targets, opsec=opsec, list_files=list_files,
             )
 
             if stream:
@@ -557,7 +575,7 @@ def main(
                     if skew_msg:
                         console.print(skew_msg)
                     for r in results:
-                        print_result_event(r, verbose=verbose)
+                        print_result_event(r, verbose=verbose or (list_files and r.protocol == "smb"))
 
             return t, results
 

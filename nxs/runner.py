@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import secrets
 import re
 import socket
 import shutil
@@ -42,6 +43,15 @@ def strip_ansi(text: str) -> str:
 
 _active_procs: set[subprocess.Popen] = set()
 _proc_lock = threading.Lock()
+_pace_lock = threading.Lock()
+_command_delay = 0.0
+_next_launch = 0.0
+
+def configure_pacing(delay: float) -> None:
+    global _command_delay, _next_launch
+    with _pace_lock:
+        _command_delay = max(0.0, delay)
+        _next_launch = 0.0
 
 
 def kill_all_procs() -> None:
@@ -75,6 +85,13 @@ def run_command(
     env: dict | None = None,
     remote_time: str | None = None,
 ) -> CommandRecord:
+    global _next_launch
+    if _command_delay > 0:
+        with _pace_lock:
+            remaining = _next_launch - time.monotonic()
+            if remaining > 0:
+                time.sleep(remaining)
+            _next_launch = time.monotonic() + _command_delay
     if remote_time and shutil.which("faketime"):
         command = ["faketime", remote_time] + command
     if debug:
@@ -284,6 +301,7 @@ def probe_ports_per_target(
     protocols: list[str],
     timeout: int = 10,
     ipv6_targets: set[str] | None = None,
+    opsec: bool = False,
 ) -> dict[str, list[str]]:
     """Probe each IP family separately; correlate resolved IPs with input names."""
     nmap = shutil.which("nmap")
@@ -310,7 +328,7 @@ def probe_ports_per_target(
             tmp_path = f.name
         try:
             cmd = [nmap] + (["-6"] if family == socket.AF_INET6 else [])
-            cmd += ["-sT", "-Pn", "-T4", "--open", "-p", ",".join(ports), "-oX", "-", "-iL", tmp_path]
+            cmd += ["-sT", "-Pn", "-T2" if opsec else "-T4", "--open", "-p", ",".join(ports), "-oX", "-", "-iL", tmp_path]
             try:
                 result = subprocess.run(
                     cmd, capture_output=True, text=True,
@@ -450,49 +468,40 @@ def smb_capability(output: str) -> tuple[str, str]:
 
 def ldap_capability(output: str) -> tuple[str, str]:
     for line in output.splitlines():
-        if "Enumerated" in line and ("domain users" in line or "users" in line):
+        if re.search(r"\bEnumerated\s+\d+\s+(?:domain\s+)?users\b", line, re.I):
             return "READ", line.split("[*]")[-1].strip()
-
-    if "[+]" in output:
-        return "READ", "bind ok"
-
-    return "AUTH", "auth ok"
+    return "AUTH", "bind reported; directory read unverified"
 
 
-def exec_capability(output: str) -> tuple[str, str]:
+def exec_capability(output: str, marker: str) -> tuple[str, str]:
     low = output.lower()
-
     if any(item.lower() in low for item in EXEC_DENIED):
-        return "AUTH", "auth ok, exec denied"
+        return "AUTH", "exec denied"
+    for line in output.splitlines():
+        if "[-]" in line:
+            return "AUTH", "exec failed: " + line.split("[-]", 1)[1].strip()[:100]
+    # A [+] authentication line cannot prove command execution.
+    for line in output.splitlines():
+        if line.rstrip().endswith(marker) and not any(x in line for x in ("[+]", "[*]", "[-]")):
+            return "EXEC", "command execution verified"
+    return "AUTH", "exec unverified (no command output)"
 
-    ok, _ = auth_state(output, "", "", "")
 
-    if ok:
-        capture = False
-        for line in output.splitlines():
-            if "[+]" in line:
-                capture = True
-                continue
-            if capture and line.strip():
-                out = line.strip()
-                match = re.match(r"^[A-Za-z]+\s+[a-zA-Z0-9\.\:\-]+\s+\d+\s+\S+\s+(.*)", out)
-                if match:
-                    msg = match.group(1).strip()
-                else:
-                    msg = out
-
-                if msg.startswith(("[+]", "[-]", "[*]")) or "executed command" in msg.lower():
-                    continue
-
-                return "EXEC", msg
-
-        if "execute command failed" in low or "error executing" in low:
-            if "executed command" not in low:
-                return "AUTH", "auth ok, exec denied"
-
-        return "EXEC", "command execution"
-
-    return "AUTH", "auth ok"
+def ldap_problem(output: str) -> tuple[str, str] | None:
+    for line in output.splitlines():
+        if "[-]" not in line:
+            continue
+        error = line.split("[-]", 1)[1].strip().rstrip("\x00")
+        low = error.lower()
+        if "000004dc" in low or "successful bind must be completed" in low:
+            return "UNCLEAR", "bind required (000004DC)"
+        if "invalidcredentials" in low or "data 52e" in low:
+            return "NO", "invalid credentials (LDAP 49)"
+        if "insufficientaccessrights" in low or "insufficient access rights" in low:
+            return "AUTH", "search denied (LDAP 50)"
+        if "searchrequest" in low or "ldaperr" in low:
+            return "UNCLEAR", "LDAP operation failed"
+    return None
 
 
 def save_records(save_dir: Path, target: str, user: str, result: ProtocolResult) -> None:
@@ -562,6 +571,8 @@ def test_protocol(
     delay: float = 0.0,
     remote_time: str | None = None,
     ipv6: bool = False,
+    opsec: bool = False,
+    list_files: bool = False,
 ) -> ProtocolResult:
     nxc = find_nxc()
     ccache_env = {**os.environ, "KRB5CCNAME": str(cred.ccache_file)} if cred.ccache_file else None
@@ -575,9 +586,6 @@ def test_protocol(
 
     for mode in modes:
         for attempt in range(retries + 1):
-            if delay and attempt:
-                time.sleep(delay)
-
             login = run_command(
                 build_cmd(nxc, protocol, target, cred, local_auth=mode, kerberos=kerberos, kdc_host=kdc_host, ipv6=ipv6),
                 timeout,
@@ -587,6 +595,11 @@ def test_protocol(
             )
 
             all_records.append(login)
+            if protocol == "ldap":
+                issue = ldap_problem(login.output)
+                if issue:
+                    state, message = issue
+                    return ProtocolResult(protocol, False, state, message, "local" if mode else "domain", all_records)
             ok, reason = auth_state(login.output, cred.user, target, protocol)
             last_reason = reason
 
@@ -597,10 +610,12 @@ def test_protocol(
                 continue
 
             level, proof = "AUTH", "auth ok"
+            if opsec and not (protocol == "smb" and list_files):
+                return ProtocolResult(protocol, True, "AUTH", "auth ok; capability checks skipped (--opsec)", "local" if mode else "domain", all_records)
 
             if protocol == "smb":
                 shares = run_command(
-                    build_cmd(nxc, protocol, target, cred, ["--shares"], mode, kerberos, kdc_host, ipv6=ipv6),
+                    build_cmd(nxc, protocol, target, cred, ["--shares"] + (["--no-write-check"] if opsec else []), mode, kerberos, kdc_host, ipv6=ipv6),
                     timeout,
                     debug,
                     env=ccache_env,
@@ -609,8 +624,23 @@ def test_protocol(
                 all_records.append(shares)
 
                 share_ok, _ = auth_state(shares.output, cred.user, "", "")
-                if share_ok:
+                if share_ok and "Enumerated shares" in shares.output:
                     level, proof = smb_capability(shares.output)
+                    if list_files:
+                        readable = []
+                        for line in shares.output.splitlines():
+                            match = PERM_RE.search(line)
+                            if match and "READ" in match.group("perm") and match.group("share").upper() != "IPC$":
+                                readable.append(match.group("share"))
+                        for share in dict.fromkeys(readable):
+                            listing = run_command(
+                                build_cmd(nxc, protocol, target, cred, ["--share", share, "--dir"], mode, kerberos, kdc_host, ipv6=ipv6),
+                                timeout, debug, env=ccache_env, remote_time=remote_time,
+                            )
+                            all_records.append(listing)
+                else:
+                    errors = [line.split("[-]", 1)[1].strip() for line in shares.output.splitlines() if "[-]" in line]
+                    proof = ("share enumeration failed: " + errors[0][:100]) if errors else "share enumeration unverified"
 
             elif protocol == "ldap":
                 users = run_command(
@@ -623,16 +653,23 @@ def test_protocol(
                 all_records.append(users)
 
                 ldap_ok, _ = auth_state(users.output, cred.user, "", "")
+                issue = ldap_problem(users.output)
+                if issue:
+                    level, proof = issue
+                    return ProtocolResult(protocol, level == "AUTH", level, proof, "local" if mode else "domain", all_records)
                 if ldap_ok:
                     level, proof = ldap_capability(users.output)
+                else:
+                    level, proof = "UNCLEAR", "LDAP search result unverified"
 
             elif protocol in {"ssh", "winrm", "wmi"}:
+                marker = "NXS_VERIFY_" + secrets.token_hex(8)
                 if protocol == "ssh":
-                    cmd_args = ["-x", "id; uname -a; cat /etc/os-release | grep PRETTY_NAME"]
+                    cmd_args = ["-x", f"printf '%s\\n' {marker}; id"]
                 elif protocol == "winrm":
-                    cmd_args = ["-x", 'cmd /c "whoami & echo. & whoami /all"']
+                    cmd_args = ["-x", f'cmd /c "echo {marker} & whoami & whoami /all"']
                 else:
-                    cmd_args = ["-x", "whoami"]
+                    cmd_args = ["-x", f'cmd /c "echo {marker} & whoami"']
                 
                 exec_check = run_command(
                     build_cmd(nxc, protocol, target, cred, cmd_args, mode, kerberos, kdc_host, ipv6=ipv6),
@@ -642,7 +679,7 @@ def test_protocol(
                     remote_time=remote_time,
                 )
                 all_records.append(exec_check)
-                level, proof = exec_capability(exec_check.output)
+                level, proof = exec_capability(exec_check.output, marker)
 
             return ProtocolResult(protocol, True, level, proof, "local" if mode else "domain", all_records)
 

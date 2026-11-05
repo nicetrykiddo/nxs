@@ -4,6 +4,7 @@ import re
 
 from rich.console import Console
 from rich.panel import Panel
+from rich.markup import escape
 
 from . import __version__
 from .models import Credential, ProtocolResult
@@ -125,49 +126,69 @@ def clean_nxc_line(line: str) -> str:
 
 
 def extract_verbose_details(result: ProtocolResult) -> list[str]:
-    details = []
+    details: list[str] = []
     if not result.records:
         return details
 
     proto = result.protocol.lower()
-    raw = "\n".join(r.output for r in result.records)
-
     if proto == "smb":
-        if result.level in {"READ", "WRITE", "ADMIN"}:
-            for line in raw.splitlines():
-                if "READ" in line or "WRITE" in line:
-                    details.append(clean_nxc_line(line))
-        elif result.level == "AUTH":
-            # Capture any timeouts or clear errors that happened during share enum
-            # but filter internal nxc exception/traceback lines
-            for line in raw.splitlines():
+        for record in result.records:
+            if "--shares" in record.command and "Enumerated shares" in record.output:
+                started = False
+                for line in record.output.splitlines():
+                    cleaned = clean_nxc_line(line)
+                    if "Enumerated shares" in cleaned:
+                        started = True
+                        continue
+                    if not started or not cleaned or cleaned.startswith(("Share", "---", "[", "SMB ")):
+                        continue
+                    parts = cleaned.split(None, 1)
+                    if not parts:
+                        continue
+                    share = parts[0]
+                    if not re.fullmatch(r"[A-Za-z0-9._$-]+", share):
+                        continue
+                    tail = parts[1] if len(parts) > 1 else ""
+                    perm = re.match(r"^(READ,WRITE|WRITE,READ|READ|WRITE)(?:\s|$)", tail)
+                    label = perm.group(1) if perm else "—"
+                    details.append(f"{share:<16} {label}")
+            elif "--dir" in record.command:
+                share = record.command[record.command.index("--share") + 1] if "--share" in record.command else "?"
+                details.append(f"{share}/ (root only)")
+                shown = 0
+                for line in record.output.splitlines():
+                    cleaned = clean_nxc_line(line).rstrip("\x00")
+                    if not cleaned or cleaned.startswith(("[*]", "[+]", "[-]")):
+                        continue
+                    if shown >= 50:
+                        details.append("  ... truncated after 50 entries")
+                        break
+                    details.append("  " + cleaned)
+                    shown += 1
+    elif proto == "ldap":
+        for record in result.records:
+            if "--users" not in record.command:
+                continue
+            for line in record.output.splitlines():
                 cleaned = clean_nxc_line(line)
-                if not cleaned:
-                    continue
-                # Skip internal nxc exception traces: "[HH:MM:SS] ERROR ..." or "filename.py:NNN"
-                if re.match(r"^\[?\d{2}:\d{2}:\d{2}\]?\s+ERROR", cleaned):
-                    continue
-                if re.match(r"^[a-z_]+\.py:\d+", cleaned):
-                    continue
-                if "timeout" in line.lower() or "[-] " in line:
+                if "Enumerated" in cleaned:
                     details.append(cleaned)
-    elif proto == "ldap" and result.level in {"READ", "WRITE"}:
-        capture = False
-        for line in raw.splitlines():
-            if "Enumerated" in line:
-                capture = True
-                details.append(clean_nxc_line(line))
+    elif proto in {"ssh", "winrm", "wmi"}:
+        for record in result.records:
+            if "-x" not in record.command:
                 continue
-            if capture and line.strip() and not ("[+]" in line or "[-]" in line or "[*]" in line):
-                details.append(clean_nxc_line(line))
-    elif proto in {"ssh", "winrm", "wmi"} and result.level == "EXEC":
-        capture = False
-        for line in raw.splitlines():
-            if "[+]" in line:
-                capture = True
-                continue
-            if capture and line.strip() and not line.startswith("[-]") and not line.startswith("[*]"):
-                details.append(clean_nxc_line(line))
+            for line in record.output.splitlines():
+                cleaned = clean_nxc_line(line).rstrip("\x00")
+                if cleaned and not cleaned.startswith(("[*]", "[+]", "[-]")):
+                    details.append(cleaned)
+
+    # Include the full source error even when the capability is NO or UNCLEAR.
+    for record in result.records:
+        for line in record.output.splitlines():
+            if "[-]" in line:
+                cleaned = clean_nxc_line(line).rstrip("\x00")
+                if cleaned and cleaned not in details:
+                    details.append(cleaned)
 
     return details
 
@@ -182,10 +203,10 @@ def print_result_event(result: ProtocolResult, verbose: bool = False) -> None:
         f"{result.proof}"
     )
 
-    if verbose and result.level not in {"NO", "UNCLEAR"}:
+    if verbose:
         details = extract_verbose_details(result)
         for detail in details:
-            console.print(f"      [dim]↳ {detail}[/dim]")
+            console.print(f"      [dim]↳ {escape(detail)}[/dim]")
 
 
 def print_results(
