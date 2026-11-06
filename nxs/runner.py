@@ -456,8 +456,12 @@ def smb_capability(output: str) -> tuple[str, str]:
         shares.append(f"{share}[{perm.replace(',', '+')}]")
 
     if is_admin:
-        detail = ", ".join(shares) if shares else "admin shares writable"
-        return "ADMIN", detail
+        admin_shares = []
+        for line in output.splitlines():
+            match = PERM_RE.search(line)
+            if match and match.group("share").upper() in {"ADMIN$", "C$"} and "WRITE" in match.group("perm"):
+                admin_shares.append(f'{match.group("share")}[{match.group("perm").replace(",", "+")}]')
+        return "ADMIN", ", ".join(admin_shares + shares)
     if any("WRITE" in item for item in shares):
         return "WRITE", ", ".join(shares)
     if shares:
@@ -477,13 +481,17 @@ def exec_capability(output: str, marker: str) -> tuple[str, str]:
     low = output.lower()
     if any(item.lower() in low for item in EXEC_DENIED):
         return "AUTH", "exec denied"
-    for line in output.splitlines():
-        if "[-]" in line:
-            return "AUTH", "exec failed: " + line.split("[-]", 1)[1].strip()[:100]
-    # A [+] authentication line cannot prove command execution.
+    # NXC may report a failed CMD invocation before successfully falling back
+    # to PowerShell, so positive proof takes precedence over earlier errors.
     for line in output.splitlines():
         if line.rstrip().endswith(marker) and not any(x in line for x in ("[+]", "[*]", "[-]")):
             return "EXEC", "command execution verified"
+    for line in output.splitlines():
+        if "[-]" in line:
+            reason = line.split("[-]", 1)[1].strip()
+            if "has no 'Invoke' rights" in reason:
+                return "AUTH", "exec denied (WinRM Invoke rights)"
+            return "AUTH", "exec failed: " + reason[:100]
     return "AUTH", "exec unverified (no command output)"
 
 

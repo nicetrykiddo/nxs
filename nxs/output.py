@@ -65,8 +65,9 @@ def print_scan_header(target: str, cred: Credential, domain: str | None, protoco
     if domain:
         identity += f"@{domain}"
     console.print(
-        f"\n[bold]{target}[/bold] · {identity}"
-        f" · [dim]{protocol_count} protocols[/dim]\n"
+        f"\n[bold]{escape(target)}[/bold] · {escape(identity)}"
+        f" · [dim]{protocol_count} protocols[/dim]\n",
+        highlight=False,
     )
 
 
@@ -104,18 +105,20 @@ def print_probe_summary(raw_target: str, targets: list[str], port_map: dict[str,
 
 
 def print_anchor_result(cred: Credential, anchor: str, ok: bool, proof: str) -> None:
-    label = cred_label(cred)
+    label = escape(cred_label(cred))
     if ok:
         console.print(
             f"  [green][+][/green] [bold]{label}[/bold]"
             f" · [blue]{anchor.upper()}[/blue] [green]valid[/green]"
-            f" — {proof}"
+            f" — {escape(proof)}",
+            highlight=False,
         )
     else:
         console.print(
             f"  [red][-][/red] [dim]{label}[/dim]"
             f" · [blue]{anchor.upper()}[/blue] [red]failed[/red]"
-            f" — {proof}"
+            f" — {escape(proof)}",
+            highlight=False,
         )
 
 
@@ -206,10 +209,19 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
         for record in result.records:
             if "--users" not in record.command:
                 continue
+            in_user_table = False
             for line in record.output.splitlines():
-                cleaned = clean_nxc_line(line)
-                if "Enumerated" in cleaned:
-                    add(cleaned)
+                cleaned = clean_nxc_line(line).rstrip("\x00")
+                if re.search(r"\bEnumerated\s+\d+\s+domain users\b", cleaned, re.I):
+                    in_user_table = True
+                    # The summary is already shown in the main result.
+                    continue
+                if in_user_table:
+                    if cleaned.startswith(("[*]", "[+]", "[-]", "[!]")):
+                        in_user_table = False
+                    elif cleaned:
+                        # Do not truncate LDAP descriptions, columns, or usernames.
+                        add(cleaned)
 
     elif proto in {"ssh", "winrm", "wmi"}:
         for record in result.records:
@@ -236,13 +248,14 @@ def print_result_event(result: ProtocolResult, verbose: bool = False) -> None:
     console.print(
         f"  [{style}]{mark}[/{style}] [blue]{result.protocol.upper():<6}[/blue] "
         f"[{style}]{result.level:<8}[/{style}] "
-        f"{result.proof}"
+        f"{escape(result.proof)}",
+        highlight=False,
     )
 
     if verbose:
         details = extract_verbose_details(result)
         for detail in details:
-            console.print(f"      [dim]↳ {escape(detail)}[/dim]")
+            console.print(f"      [dim]↳ {escape(detail)}[/dim]", highlight=False)
 
 
 def print_results(
@@ -258,7 +271,7 @@ def print_results(
                 print(f"{result.protocol.upper()} {result.level} {result.proof}")
         return
 
-    console.print(f"\n  [bold]{target}[/bold]  {user}\n")
+    console.print(f"\n  [bold]{escape(target)}[/bold]  {escape(user)}\n", highlight=False)
 
     for result in results:
         print_result_event(result, verbose=verbose)
