@@ -581,6 +581,7 @@ def test_protocol(
     ipv6: bool = False,
     opsec: bool = False,
     list_files: bool = False,
+    verify_exec: bool = False,
 ) -> ProtocolResult:
     nxc = find_nxc()
     ccache_env = {**os.environ, "KRB5CCNAME": str(cred.ccache_file)} if cred.ccache_file else None
@@ -618,7 +619,19 @@ def test_protocol(
                 continue
 
             level, proof = "AUTH", "auth ok"
+            if protocol == "winrm":
+                # NetExec only appends (Pwn3d!) after its WinRM WSMan
+                # shell enumeration check succeeds. This is strong evidence
+                # of likely shell access, not proof a command ran.
+                if any("[+]" in line and "(Pwn3d!)" in line
+                       for line in login.output.splitlines()):
+                    level, proof = "SHELL", "WinRM shell likely (WSMan check passed)"
+                else:
+                    proof = "WinRM authentication accepted; shell unverified"
+
             if opsec and not (protocol == "smb" and list_files):
+                if protocol == "winrm":
+                    return ProtocolResult(protocol, True, level, proof, "local" if mode else "domain", all_records)
                 return ProtocolResult(protocol, True, "AUTH", "auth ok; capability checks skipped (--opsec)", "local" if mode else "domain", all_records)
 
             if protocol == "smb":
@@ -670,21 +683,31 @@ def test_protocol(
                 else:
                     level, proof = "UNCLEAR", "LDAP search result unverified"
 
-            elif protocol in {"ssh", "winrm", "wmi"}:
+            elif protocol == "winrm":
+                if verify_exec:
+                    marker = "NXS_VERIFY_" + secrets.token_hex(8)
+                    executed = run_command(
+                        build_cmd(nxc, protocol, target, cred, ["-X", f"Write-Output {marker}"], mode, kerberos, kdc_host, ipv6=ipv6),
+                        timeout, debug, env=ccache_env, remote_time=remote_time,
+                    )
+                    all_records.append(executed)
+                    verified_level, exec_proof = exec_capability(executed.output, marker)
+                    if verified_level == "EXEC":
+                        level, proof = "EXEC", "PowerShell execution verified"
+                    elif level == "SHELL":
+                        proof += "; PowerShell verification failed"
+                    else:
+                        proof = exec_proof
+
+            elif protocol in {"ssh", "wmi"}:
                 marker = "NXS_VERIFY_" + secrets.token_hex(8)
                 if protocol == "ssh":
                     cmd_args = ["-x", f"printf '%s\\n' {marker}; id"]
-                elif protocol == "winrm":
-                    cmd_args = ["-x", f'cmd /c "echo {marker} & whoami & whoami /all"']
                 else:
                     cmd_args = ["-x", f'cmd /c "echo {marker} & whoami"']
-                
                 exec_check = run_command(
                     build_cmd(nxc, protocol, target, cred, cmd_args, mode, kerberos, kdc_host, ipv6=ipv6),
-                    timeout,
-                    debug,
-                    env=ccache_env,
-                    remote_time=remote_time,
+                    timeout, debug, env=ccache_env, remote_time=remote_time,
                 )
                 all_records.append(exec_check)
                 level, proof = exec_capability(exec_check.output, marker)

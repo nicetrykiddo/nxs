@@ -243,6 +243,7 @@ def run_check(
     ipv6: bool = False,
     opsec: bool = False,
     list_files: bool = False,
+    verify_exec: bool = False,
 ):
     results = []
 
@@ -254,6 +255,7 @@ def run_check(
                 kerberos=kerberos, kdc_host=kdc_host,
                 debug=debug, delay=delay, remote_time=remote_time,
                 ipv6=ipv6, opsec=opsec, list_files=list_files,
+                verify_exec=verify_exec,
             )
             for protocol in protocols
         ]
@@ -290,6 +292,7 @@ def main(
     combo: bool = typer.Option(False, "-C", "--combo", help="Try all user×password combinations"),
     opsec: bool = typer.Option(False, "--opsec", help="Sequential paced auth checks; skips automatic capability probes"),
     list_files: bool = typer.Option(False, "--list-files", help="List root entries of readable SMB shares, no recursion"),
+    verify_exec: bool = typer.Option(False, "--verify-exec", help="Explicitly test WinRM PowerShell command execution"),
     protocols: Optional[str] = typer.Option(None, "--protocols", help=f"Comma list ({PROTOCOL_LIST})"),
     local_auth: bool = typer.Option(False, "--local-auth", help="Local auth for SMB/WMI"),
     try_local: bool = typer.Option(False, "--try-local", help="Retry with --local-auth on unclear"),
@@ -425,7 +428,7 @@ def main(
                     kerberos=kerberos, kdc_host=kdc_host,
                     debug=debug, delay=delay,
                     remote_time=remote_time,
-                    ipv6=t in ipv6_targets, opsec=opsec, list_files=list_files,
+                    ipv6=t in ipv6_targets, opsec=opsec, list_files=list_files, verify_exec=verify_exec,
                 )
                 local_anchor.append((t, cred, anchor_result))
                 if anchor_result.ok:
@@ -496,7 +499,7 @@ def main(
                 kerberos=kerberos, kdc_host=kdc_host,
                 debug=debug, delay=delay,
                 remote_time=remote_time,
-                ipv6=t in ipv6_targets, opsec=opsec, list_files=list_files,
+                ipv6=t in ipv6_targets, opsec=opsec, list_files=list_files, verify_exec=verify_exec,
             ) if remaining else []
 
             all_results = [anchor_result] + extra_results
@@ -566,7 +569,7 @@ def main(
                 kerberos=kerberos, kdc_host=kdc_host,
                 debug=debug, delay=delay,
                 remote_time=remote_time,
-                ipv6=t in ipv6_targets, opsec=opsec, list_files=list_files,
+                ipv6=t in ipv6_targets, opsec=opsec, list_files=list_files, verify_exec=verify_exec,
             )
 
             if stream:
