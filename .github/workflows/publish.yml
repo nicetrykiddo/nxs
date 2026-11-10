@@ -3,6 +3,9 @@ name: Publish to PyPI
 on:
   release:
     types: [published]
+  push:
+    branches: [main]
+    paths: ['.github/workflows/publish.yml']
 
 jobs:
   publish:
