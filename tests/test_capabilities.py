@@ -211,6 +211,16 @@ class ScannerTests(unittest.TestCase):
         self.assertIn("0/2", result)
         self.assertIn("none", result)
 
+    def test_wmi_has_consistent_protocol_label(self):
+        with patch.object(console, "print") as printer:
+            print_probe_summary("host", ["host"], {"host": ["wmi", "ldap", "smb"]},
+                                ["wmi", "ldap", "smb"])
+            print_probe_summary("targets.txt", ["host", "other"],
+                                {"host": ["wmi"], "other": []}, ["wmi", "ldap"])
+        display = " ".join(str(call) for call in printer.call_args_list)
+        self.assertIn("WMI", display)
+        self.assertNotIn("RPC(135)", display)
+
     @patch("nxs.runner.shutil.which", return_value=None)
     @patch("nxs.runner.tcp_port_open", side_effect=lambda host, port: port == 445)
     def test_missing_nmap_does_not_claim_all_ports_open(self, port, which):
