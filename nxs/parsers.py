@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-NXC_PREFIX = re.compile(r"^[A-Z][A-Z0-9_]*\s+\S+\s+\d+\s+\S+\s+(.*)$")
+NXC_PREFIX = re.compile(r"^[A-Z][A-Z0-9_-]*\s+\S+\s+\d+\s+\S+\s+(.*)$")
 PERMISSIONS = {"READ", "WRITE", "READ,WRITE", "WRITE,READ"}
 
 
