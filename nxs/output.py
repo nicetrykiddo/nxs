@@ -97,7 +97,7 @@ def print_probe_summary(raw_target: str, targets: list[str], port_map: dict[str,
         console.print()
     else:
         t = targets[0]
-        protos = port_map.get(t, all_protocols)
+        protos = port_map.get(t, [])
         names = ", ".join("RPC(135)" if p == "wmi" else p.upper() for p in protos) if protos else "none"
         domain_str = f" · [dim]{domain}[/dim]" if domain else ""
         console.print(
@@ -150,7 +150,7 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
     if proto == "smb":
         for record in result.records:
             if "--shares" in record.command and "Enumerated shares" in record.output:
-                for share in parse_smb_shares(record.output):
+                for share in parse_smb_shares(redact_record(record)["output"]):
                     add(f"{share.name:<24} {share.display_permissions:<10} {share.remark}".rstrip())
 
             elif "--dir" in record.command:
@@ -190,7 +190,7 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
             elif "--users" in record.command:
                 add("SAMR user enumeration (SMB)")
                 for line in redact_record(record)["output"].splitlines():
-                    cleaned = clean_nxc_line(line).rstrip("\\x00")
+                    cleaned = clean_nxc_line(line).rstrip("\x00")
                     if cleaned and not cleaned.startswith(("[*] Windows", "[+]")):
                         add(cleaned)
 
@@ -214,7 +214,7 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
 
     elif proto in {"ssh", "winrm", "wmi"}:
         for record in result.records:
-            if "-x" not in record.command:
+            if "-x" not in record.command and "-X" not in record.command:
                 continue
             for line in redact_record(record)["output"].splitlines():
                 cleaned = clean_nxc_line(line).rstrip("\x00")
