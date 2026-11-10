@@ -221,6 +221,64 @@ class ScannerTests(unittest.TestCase):
         self.assertIn("WMI", display)
         self.assertNotIn("RPC(135)", display)
 
+    @patch("nxs.runner.find_nxc", return_value="nxc")
+    @patch("nxs.runner.run_command")
+    def test_winrm_verifies_powershell_output_by_default(self, run, _nxc):
+        login = "WINRM-SSL 10.129.95.241 5986 PRINTER [+] return.local\\svc-printer:secret (Pwn3d!)"
+        def response(command, *args, **kwargs):
+            if "-X" in command:
+                marker = command[command.index("-X") + 1].split()[-1]
+                return CommandRecord(command, 0,
+                    f"WINRM-SSL 10.129.95.241 5986 PRINTER {marker}")
+            return CommandRecord(command, 0, login)
+
+        run.side_effect = response
+        result = scan_protocol("10.129.95.241", "winrm",
+                               Credential("svc-printer", password="secret"))
+        self.assertEqual(result.level, "EXEC")
+        self.assertEqual(result.proof, "PowerShell command output verified")
+        self.assertEqual(run.call_count, 2)
+        self.assertIn("-X", run.call_args_list[1].args[0])
+
+    @patch("nxs.runner.find_nxc", return_value="nxc")
+    @patch("nxs.runner.run_command")
+    def test_winrm_does_not_claim_exec_from_pwn3d_or_echoed_marker(self, run, _nxc):
+        login = "WINRM-SSL 10.129.95.241 5986 PRINTER [+] return.local\\svc-printer:secret (Pwn3d!)"
+        def response(command, *args, **kwargs):
+            if "-X" in command:
+                marker = command[command.index("-X") + 1].split()[-1]
+                return CommandRecord(command, 0,
+                    f"WINRM-SSL 10.129.95.241 5986 PRINTER [-] Failed to run Write-Output {marker}")
+            return CommandRecord(command, 0, login)
+
+        run.side_effect = response
+        result = scan_protocol("10.129.95.241", "winrm",
+                               Credential("svc-printer", password="secret"))
+        self.assertEqual(result.level, "AUTH")
+        self.assertNotIn("likely", result.proof)
+        self.assertEqual(run.call_count, 2)
+
+    @patch("nxs.runner.find_nxc", return_value="nxc")
+    @patch("nxs.runner.run_command")
+    def test_winrm_opt_out_and_opsec_do_not_claim_exec(self, run, _nxc):
+        login = "WINRM-SSL 10.129.95.241 5986 PRINTER [+] return.local\\svc-printer:secret (Pwn3d!)"
+        run.return_value = CommandRecord([], 0, login)
+        cred = Credential("svc-printer", password="secret")
+        skipped = scan_protocol("host", "winrm", cred, verify_exec=False)
+        self.assertEqual(skipped.level, "AUTH")
+        self.assertIn("command not tested", skipped.proof)
+        self.assertEqual(run.call_count, 1)
+        run.reset_mock()
+        quiet = scan_protocol("host", "winrm", cred, opsec=True)
+        self.assertEqual(quiet.level, "AUTH")
+        self.assertIn("skipped", quiet.proof)
+        self.assertEqual(run.call_count, 1)
+
+    def test_ssl_prefixed_execution_marker(self):
+        marker = "NXS_VERIFY_ABC123"
+        output = f"WINRM-SSL 10.0.0.1 5986 PRINTER {marker}"
+        self.assertEqual(exec_capability(output, marker)[0], "EXEC")
+
     @patch("nxs.runner.shutil.which", return_value=None)
     @patch("nxs.runner.tcp_port_open", side_effect=lambda host, port: port == 445)
     def test_missing_nmap_does_not_claim_all_ports_open(self, port, which):
