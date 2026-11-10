@@ -252,14 +252,18 @@ def check_port_state(target: str, protocol: str) -> str:
             ["-sT", "-Pn", "-p", ",".join(ports), target],
             capture_output=True, text=True, timeout=5,
         )
-        seen_closed = False
+        states = {}
         for line in result.stdout.splitlines():
-            if any(f"{port}/tcp" in line for port in ports):
+            for port in ports:
+                if f"{port}/tcp" not in line:
+                    continue
                 if "open" in line and "filtered" not in line:
                     return "port open"
                 if "closed" in line:
-                    seen_closed = True
-        if seen_closed and all(f"{port}/tcp" in result.stdout for port in ports):
+                    states[port] = "closed"
+                elif "filtered" in line:
+                    states[port] = "filtered"
+        if len(states) == len(ports) and all(state == "closed" for state in states.values()):
             return "port closed"
     except (OSError, subprocess.TimeoutExpired):
         pass
