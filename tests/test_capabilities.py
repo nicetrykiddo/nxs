@@ -36,6 +36,9 @@ class ShareParserTests(unittest.TestCase):
         rows = parse_smb_shares(SHARES)
         self.assertIn("Shares", [r.name for r in rows])
         self.assertIn("Project Files", [r.name for r in rows])
+        self.assertIn("Project  Files", [r.name for r in parse_smb_shares(
+            SHARES + "\\nSMB 10.129.14.147 445 DC01 Project  Files   READ"
+        )])
         self.assertEqual(next(r for r in rows if r.name == "Project Files").display_permissions, "READ+WRITE")
         self.assertEqual(next(r for r in rows if r.name == "Write Only").display_permissions, "WRITE")
         self.assertEqual(smb_capability(SHARES)[0], "WRITE")
@@ -116,6 +119,30 @@ class ScannerTests(unittest.TestCase):
         cmds = [call.args[0] for call in run.call_args_list]
         listed = [cmd[cmd.index("--share") + 1] for cmd in cmds if "--share" in cmd]
         self.assertEqual(listed, ["Shares", "Project Files"])
+
+    @patch("nxs.runner.find_nxc", return_value="nxc")
+    @patch("nxs.runner.run_command")
+    def test_optional_samr_enumeration_is_labeled(self, run, _nxc):
+        run.side_effect = [
+            CommandRecord([], 0, BANNER + "\\n" + LOGIN),
+            CommandRecord([], 0, SHARES),
+            CommandRecord([], 0, LOGIN + "\\nSMB host 445 DC01 [+] Enumerated 3 domain users"),
+        ]
+        res = scan_protocol("host", "smb", Credential("guest", password=""), enum_users=True)
+        self.assertEqual(run.call_count, 3)
+        self.assertIn("SAMR Enumerated 3 domain users", res.proof)
+
+    @patch("nxs.runner.find_nxc", return_value="nxc")
+    @patch("nxs.runner.run_command")
+    def test_network_timeout_is_retried(self, run, _nxc):
+        run.side_effect = [
+            CommandRecord([], 124, "TIMEOUT"),
+            CommandRecord([], 0, BANNER + "\\n" + LOGIN),
+            CommandRecord([], 0, SHARES),
+        ]
+        res = scan_protocol("host", "smb", Credential("guest", password=""), retries=1)
+        self.assertEqual(res.level, "WRITE")
+        self.assertEqual(run.call_count, 3)
 
     @patch("nxs.runner.shutil.which", return_value=None)
     @patch("nxs.runner.tcp_port_open", side_effect=lambda host, port: port == 445)
