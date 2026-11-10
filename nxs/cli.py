@@ -157,7 +157,11 @@ def resolve_credentials(
         return creds
 
     if user is None:
-        raise typer.BadParameter("Provide either a creds file or -u/--user")
+        if password is not None or ntlm_hash is not None:
+            raise typer.BadParameter("provide -u/--user when passing a password or hash")
+        # No credentials is a deliberate anonymous/guest SMB discovery path.
+        return [Credential(user="", password="", domain=domain),
+                Credential(user="guest", password="", domain=domain)]
 
     if password is not None and ntlm_hash is not None:
         raise typer.BadParameter("use either --password or --hash, not both")
@@ -282,7 +286,7 @@ def _make_stream_handler(verbose: bool):
 
 @app.command()
 def main(
-    target: str = typer.Argument(..., help="Target IP, hostname, CIDR, or file"),
+    target: str = typer.Argument(..., help="Target IP, hostname, CIDR, or file. No credentials: anonymous + guest discovery"),
     creds_file: Optional[str] = typer.Option(None, "-f", "--file", help="Optional file with user:pass or user:hash lines"),
     user: Optional[str] = typer.Option(None, "-u", "--user", help="Username or file with usernames"),
     password: Optional[str] = typer.Option(None, "-p", "--password", help="Password or file with passwords"),
@@ -408,155 +412,57 @@ def main(
     target_workers = 1 if opsec else min(len(targets), 10)
 
     if len(creds) > 1:
-        valid_creds = []
-        all_anchor_results = []
+        # Every credential is evaluated against every reachable protocol.
+        # SMB-only "anchor" gating incorrectly skipped credentials valid on WinRM/WMI.
+        pairs = [(t, cr) for t in targets for cr in creds]
+        workers = 1 if opsec else min(len(pairs), 10)
 
-        def _validate_one_target(t, progress=None, task_id=None):
-            target_protos = port_map.get(t, [])
-            if not target_protos:
-                return t, [], []
-
-            anchor = next((p for p in ANCHOR_PRIORITY if p in target_protos), target_protos[0])
-            remaining = [p for p in target_protos if p != anchor]
-
-            local_valid = []
-            local_anchor = []
-            for cred in creds:
-                anchor_result = test_protocol(
-                    t, anchor, cred, timeout, retries,
-                    local_auth=local_auth, try_local=try_local,
-                    kerberos=kerberos, kdc_host=kdc_host,
-                    debug=debug, delay=delay,
-                    remote_time=remote_time,
-                    ipv6=t in ipv6_targets, opsec=opsec, list_files=list_files, verify_exec=verify_exec,
-                )
-                local_anchor.append((t, cred, anchor_result))
-                if anchor_result.ok:
-                    local_valid.append((t, cred, anchor_result, anchor, remaining))
-                if progress:
-                    progress.advance(task_id)
-
-            if stream:
-                with _out_lock:
-                    console.print(f"  [dim]{t} — anchor: {anchor.upper()} — validating {len(creds)} credentials[/dim]\n")
-                    for _, cr, ar in local_anchor:
-                        print_anchor_result(cr, anchor, ar.ok, ar.proof)
-                    console.print(f"  [dim]{len(local_valid)}/{len(creds)} valid on {t}[/dim]\n")
-
-            return t, local_valid, local_anchor
-
-        _anchor_progress = None
-        _anchor_task = None
-        if stream:
-            _anchor_progress = Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                TimeElapsedColumn(),
-                TextColumn("·"),
-                TimeRemainingColumn(),
-                console=console,
-            )
-            _anchor_progress.start()
-            _anchor_task = _anchor_progress.add_task(
-                "Validating credentials",
-                total=len(targets) * len(creds),
-            )
-
-        with ThreadPoolExecutor(max_workers=target_workers) as executor:
-            futures = [executor.submit(_validate_one_target, t, _anchor_progress, _anchor_task) for t in targets]
-            for future in as_completed(futures):
-                t, local_valid, local_anchor = future.result()
-                valid_creds.extend(local_valid)
-                all_anchor_results.extend(local_anchor)
-
-        if _anchor_progress:
-            _anchor_progress.stop()
-
-        if not valid_creds:
-            if stream:
-                console.print(f"\n  [dim]0/{len(all_anchor_results)} credential-target pairs valid — skipping full scan[/dim]\n")
-            if json_out:
-                for t, cred, anchor_result in all_anchor_results:
-                    all_json_rows.append({
-                        "target": t,
-                        "user": cred.user,
-                        "domain": domain,
-                        "results": [anchor_result.public_dict(raw=raw)],
-                    })
-                typer.echo(json.dumps(all_json_rows if len(all_json_rows) != 1 else all_json_rows[0], indent=2))
-            return
-
-        if stream:
-            console.print(f"\n  [dim]{len(valid_creds)}/{len(all_anchor_results)} valid — scanning remaining protocols[/dim]")
-
-        def _scan_one_pair(pair):
-            t, cred, anchor_result, anchor, remaining = pair
-            extra_results = run_check(
-                t, cred, remaining, timeout, retries, threads,
+        def _scan_pair(pair):
+            t, cr = pair
+            protos = port_map.get(t, [])
+            results = run_check(
+                t, cr, protos, timeout, retries, threads,
                 local_auth=local_auth, try_local=try_local,
                 kerberos=kerberos, kdc_host=kdc_host,
-                debug=debug, delay=delay,
-                remote_time=remote_time,
-                ipv6=t in ipv6_targets, opsec=opsec, list_files=list_files, verify_exec=verify_exec,
-            ) if remaining else []
-
-            all_results = [anchor_result] + extra_results
-
+                debug=debug, delay=delay, remote_time=remote_time,
+                ipv6=t in ipv6_targets, opsec=opsec,
+                list_files=list_files, verify_exec=verify_exec,
+            )
             if stream:
                 with _out_lock:
-                    print_scan_header(t, cred, domain, len(remaining) + 1)
-                    if skew_msg:
-                        console.print(skew_msg)
-                    print_result_event(anchor_result, verbose=verbose or (list_files and anchor_result.protocol == "smb"))
-                    for r in extra_results:
-                        print_result_event(r, verbose=verbose or (list_files and r.protocol == "smb"))
+                    print_scan_header(t, cr, domain, len(protos))
+                    for item in results:
+                        print_result_event(item, verbose=verbose or (list_files and item.protocol == "smb"))
+            return t, cr, results
 
-            return t, cred, all_results
-
-        _scan_progress = None
-        _scan_task = None
+        progress = None
+        task = None
         if stream:
-            _scan_progress = Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-                TimeElapsedColumn(),
-                TextColumn("·"),
-                TimeRemainingColumn(),
-                console=console,
+            progress = Progress(
+                SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+                BarColumn(), TimeElapsedColumn(), console=console,
             )
-            _scan_progress.start()
-            _scan_task = _scan_progress.add_task(
-                "Scanning protocols",
-                total=len(valid_creds),
-            )
+            progress.start()
+            task = progress.add_task("Scanning credentials on all protocols", total=len(pairs))
 
-        with ThreadPoolExecutor(max_workers=target_workers) as executor:
-            futures = [executor.submit(_scan_one_pair, pair) for pair in valid_creds]
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(_scan_pair, pair) for pair in pairs]
             for future in as_completed(futures):
-                t, cred, all_results = future.result()
-                if _scan_progress:
-                    _scan_progress.advance(_scan_task)
-
+                t, cr, results = future.result()
+                if progress:
+                    progress.advance(task)
                 if save:
-                    for result in all_results:
-                        save_records(save, t, cred.user, result)
-
+                    for result in results:
+                        save_records(save, t, cr.user, result)
                 if json_out:
                     all_json_rows.append({
-                        "target": t,
-                        "user": cred.user,
-                        "domain": domain,
-                        "results": [r.public_dict(raw=raw) for r in all_results],
+                        "target": t, "user": cr.user, "domain": cr.domain,
+                        "results": [item.public_dict(raw=raw) for item in results],
                     })
                 elif not stream:
-                    print_results(t, cred.user, all_results, quiet=quiet, verbose=verbose)
-
-        if _scan_progress:
-            _scan_progress.stop()
+                    print_results(t, cr.user, results, quiet=quiet, verbose=verbose)
+        if progress:
+            progress.stop()
 
     else:
         cred = creds[0]
