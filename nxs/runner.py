@@ -417,51 +417,36 @@ def probe_ports_per_target(
 
 
 def auth_state(output: str, user: str, target: str, protocol: str) -> tuple[bool | None, str]:
-    """Treat failed authentication separately from inconclusive transport.
-
-    The NXC banner and generic [+] status messages are never authentication proof.
-    """
+    """Return verified login success, explicit credential failure, or inconclusive."""
     if not output.strip():
-        if target and protocol:
-            state = check_port_state(target, protocol)
-            if state == "port closed":
-                return False, state
+        if target and protocol and check_port_state(target, protocol) == "port closed":
+            return False, "port closed"
         return None, "empty response"
 
     low = output.lower()
-    for fail in HARD_FAILS:
-        if fail.lower() in low:
-            return False, fail
-
-    if any(x in low for x in ("nt_status_io_timeout", "timeout", "connection refused",
-                              "no route", "unreachable")):
+    for error in HARD_FAILS:
+        if error.lower() in low:
+            return False, error
+    if any(item in low for item in ("timeout", "connection refused", "no route", "unreachable")):
         return None, "connection timed out or unavailable"
 
-    success = []
-    failures = []
+    expected = user.rsplit("\\", 1)[-1].split("@", 1)[0].casefold()
+    other_error = None
     for line in output.splitlines():
-        if "[+]" in line:
-            after = line.split("[+]", 1)[1].strip()
-            # Auth lines are of the form DOMAIN\\user: or user:password.
-            m = re.match(r"^(?:[^\\\s]+\\)?(?P<name>[^:\s]*):", after)
-            if m and m.group("name").casefold() == user.casefold():
-                success.append(after)
-            # NXC can map an arbitrary supplied name to Guest.
-            elif m and "(Guest)" in after and user and m.group("name").casefold() == user.casefold():
-                success.append(after)
-            elif "(Pwn3d!)" in after and user and user.casefold() in after.casefold():
-                success.append(after)
-        if "[-]" in line:
-            failures.append(line.split("[-]", 1)[1].strip())
+        match = re.search(r"\[(?P<status>[+-])\]\s+(?P<message>.*)$", line)
+        if not match:
+            continue
+        message = match.group("message").strip()
+        login = re.match(r"^(?:[^\\:\s]+\\)?([^:\s]*):", message)
+        if login and login.group(1).casefold() == expected:
+            if match.group("status") == "+":
+                return True, "guest mapped" if "(Guest)" in message else "auth ok"
+            return False, message.split(":", 1)[-1].strip() or "authentication rejected"
+        if match.group("status") == "-":
+            other_error = message
 
-    if success:
-        return True, "guest mapped" if any("(Guest)" in x for x in success) else "auth ok"
-    if failures:
-        error = failures[0]
-        first, _, tail = error.partition(" ")
-        if ":" in first and ("\\" in first or (user and first.startswith(user + ":"))):
-            error = tail or "authentication rejected"
-        return False, error[:160]
+    if other_error:
+        return None, other_error[:160]
     return None, "no verified authentication response"
 
 
@@ -477,7 +462,7 @@ def smb_capability(output: str) -> tuple[str, str]:
         return "WRITE", ", ".join(f"{s.name}[{s.display_permissions}]" for s in usable)
     if usable:
         return "READ", ", ".join(f"{s.name}[{s.display_permissions}]" for s in usable)
-    return "AUTH", "shares enumerated; no readable/writable disk shares"
+    return "AUTH", ("shares parsed; no readable/writable disk shares" if shares else "share table empty or unparseable")
 
 
 def ldap_capability(output: str) -> tuple[str, str]:
@@ -488,20 +473,17 @@ def ldap_capability(output: str) -> tuple[str, str]:
 
 
 def exec_capability(output: str, marker: str) -> tuple[str, str]:
+    """A command is verified only when NXC returns the exact marker as output."""
+    from .parsers import clean_nxc_line
+
+    if any(clean_nxc_line(line) == marker for line in output.splitlines()):
+        return "EXEC", "command execution verified"
     low = output.lower()
-    # NXC may report a failed CMD invocation before successfully falling back
-    # to PowerShell, so positive proof takes precedence over earlier errors.
-    for line in output.splitlines():
-        if line.rstrip().endswith(marker) and not any(x in line for x in ("[+]", "[*]", "[-]")):
-            return "EXEC", "command execution verified"
     if any(item.lower() in low for item in EXEC_DENIED):
         return "AUTH", "exec denied"
     for line in output.splitlines():
         if "[-]" in line:
-            reason = line.split("[-]", 1)[1].strip()
-            if "has no 'Invoke' rights" in reason:
-                return "AUTH", "exec denied (WinRM Invoke rights)"
-            return "AUTH", "exec failed: " + reason[:100]
+            return "AUTH", "exec failed: " + line.split("[-]", 1)[1].strip()[:100]
     return "AUTH", "exec unverified (no command output)"
 
 
@@ -699,15 +681,11 @@ def test_protocol(
                 )
                 all_records.append(users)
 
-                ldap_ok, _ = auth_state(users.output, cred.user, "", "")
                 issue = ldap_problem(users.output)
                 if issue:
                     level, proof = issue
-                    return ProtocolResult(protocol, level == "AUTH", level, proof, "local" if mode else "domain", all_records)
-                if ldap_ok:
-                    level, proof = ldap_capability(users.output)
                 else:
-                    level, proof = "UNCLEAR", "LDAP search result unverified"
+                    level, proof = ldap_capability(users.output)
 
             elif protocol == "winrm":
                 if verify_exec:
