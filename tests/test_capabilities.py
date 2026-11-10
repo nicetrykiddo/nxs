@@ -45,6 +45,23 @@ class ShareParserTests(unittest.TestCase):
         self.assertIn("Shares[READ]", smb_capability(SHARES)[1])
         self.assertIn("Project Files[READ+WRITE]", smb_capability(SHARES)[1])
 
+    def test_long_and_spaced_share_names_with_permissions(self):
+        output = SHARES + "\n" + "\n".join([
+            "SMB 10.129.14.147 445 DC01 A very long project share name          READ,WRITE          Internal data",
+            "SMB 10.129.14.147 445 DC01 Share          READ",
+            "SMB 10.129.14.147 445 DC01 Project  Team  Files          WRITE,READ",
+        ])
+        rows = {row.name: row for row in parse_smb_shares(output)}
+        self.assertEqual(rows["A very long project share name"].display_permissions, "READ+WRITE")
+        self.assertEqual(rows["Share"].display_permissions, "READ")
+        self.assertEqual(rows["Project  Team  Files"].display_permissions, "READ+WRITE")
+
+    def test_share_table_requires_heading(self):
+        self.assertEqual(parse_smb_shares(
+            "SMB host 445 DC01 [*] Enumerated shares\n"
+            "SMB host 445 DC01 ShareMe          READ"
+        ), [])
+
     def test_metadata_is_information_not_a_share(self):
         meta = smb_metadata(SHARES)
         self.assertEqual(meta["Null Auth"], "True")
@@ -74,6 +91,18 @@ class EvidenceTests(unittest.TestCase):
         guest = "SMB 10.129.14.147 445 DC01 [+] timelapse.htb\\~: (Guest)"
         self.assertEqual(auth_state(guest, "~", "", ""), (True, "guest mapped"))
 
+    def test_non_authentication_error_is_not_bad_credentials(self):
+        msg = "SMB 10.0.0.1 445 DC01 [-] Error enumerating shares: STATUS_ACCESS_DENIED"
+        state, reason = auth_state(msg, "guest", "", "")
+        self.assertIsNone(state)
+        self.assertIn("Error enumerating shares", reason)
+        rejected = "SMB 10.0.0.1 445 DC01 [-] LAB\\guest: STATUS_LOGON_FAILURE"
+        self.assertFalse(auth_state(rejected, "guest", "", "")[0])
+
+    def test_upn_and_domain_prefix_logins(self):
+        self.assertTrue(auth_state(LOGIN, "guest@timelapse.htb", "", "")[0])
+        self.assertTrue(auth_state(LOGIN, "timelapse.htb\\guest", "", "")[0])
+
     def test_connection_timeouts_are_inconclusive(self):
         self.assertIsNone(auth_state("TIMEOUT", "guest", "", "")[0])
         self.assertIsNone(auth_state("connection refused", "guest", "", "")[0])
@@ -81,6 +110,13 @@ class EvidenceTests(unittest.TestCase):
     def test_exec_marker_beats_earlier_denial(self):
         result = exec_capability("[-] STATUS_ACCESS_DENIED\nVERIFY_123", "VERIFY_123")
         self.assertEqual(result[0], "EXEC")
+
+    def test_exec_marker_must_be_standalone_output(self):
+        marker = "NXS_VERIFY_123"
+        error = f"[-] Could not execute cmd /c echo {marker}"
+        self.assertNotEqual(exec_capability(error, marker)[0], "EXEC")
+        response = f"WMI 10.0.0.1 135 DC01 {marker}"
+        self.assertEqual(exec_capability(response, marker)[0], "EXEC")
 
     def test_raw_evidence_redacts_secrets(self):
         record = CommandRecord(["nxc", "smb", "host", "-u", "alice", "-p", "secret"], 0,
@@ -143,6 +179,18 @@ class ScannerTests(unittest.TestCase):
         res = scan_protocol("host", "smb", Credential("guest", password=""), retries=1)
         self.assertEqual(res.level, "WRITE")
         self.assertEqual(run.call_count, 3)
+
+    @patch("nxs.runner.find_nxc", return_value="nxc")
+    @patch("nxs.runner.run_command")
+    def test_ldap_read_uses_enumeration_proof_without_second_login(self, run, _nxc):
+        run.side_effect = [
+            CommandRecord([], 0, "LDAP 10.0.0.1 389 DC01 [+] LAB\\alice:"),
+            CommandRecord([], 0, "LDAP 10.0.0.1 389 DC01 [*] Enumerated 3 domain users"),
+        ]
+        result = scan_protocol("dc01", "ldap", Credential("alice", password="test"))
+        self.assertTrue(result.ok)
+        self.assertEqual(result.level, "READ")
+        self.assertIn("Enumerated 3", result.proof)
 
     @patch("nxs.runner.shutil.which", return_value=None)
     @patch("nxs.runner.tcp_port_open", side_effect=lambda host, port: port == 445)
