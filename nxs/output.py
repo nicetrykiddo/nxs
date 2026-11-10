@@ -8,6 +8,7 @@ from rich.markup import escape
 
 from . import __version__
 from .models import Credential, ProtocolResult
+from .parsers import clean_nxc_line, parse_smb_shares, smb_metadata
 
 console = Console()
 
@@ -52,15 +53,15 @@ LEVEL_MARK = {
 
 
 def cred_label(cred: Credential) -> str:
-    """Format credential for display: user:secret."""
+    """Never print plaintext passwords or hashes in CLI output."""
+    who = cred.user or "<anonymous>"
     if cred.ccache_file:
-        return f"{cred.user} [ticket]"
+        return f"{who} [ticket]"
     if cred.ntlm_hash:
-        return f"{cred.user}:{cred.ntlm_hash}"
-    if cred.password:
-        return f"{cred.user}:{cred.password}"
-    return cred.user
-
+        return f"{who} [NTLM hash]"
+    if cred.password is not None and cred.password:
+        return f"{who} [password]"
+    return who
 
 def print_scan_header(target: str, cred: Credential, domain: str | None, protocol_count: int) -> None:
     identity = cred_label(cred)
@@ -124,9 +125,6 @@ def print_anchor_result(cred: Credential, anchor: str, ok: bool, proof: str) -> 
         )
 
 
-def clean_nxc_line(line: str) -> str:
-    match = re.match(r"^[A-Za-z]+\s+[0-9a-zA-Z\.\\:\-]+\s+\d+\s+\S+\s+(.*)", line)
-    return match.group(1).strip() if match else line.strip()
 
 
 def extract_verbose_details(result: ProtocolResult) -> list[str]:
@@ -151,27 +149,8 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
     if proto == "smb":
         for record in result.records:
             if "--shares" in record.command and "Enumerated shares" in record.output:
-                started = False
-                for line in record.output.splitlines():
-                    cleaned = clean_nxc_line(line)
-                    if "Enumerated shares" in cleaned:
-                        started = True
-                        continue
-                    if not started or not cleaned or cleaned.startswith(("Share", "---", "[", "SMB ")):
-                        continue
-                    cols = re.split(r"\s{2,}", cleaned, maxsplit=2)
-                    share = cols[0].strip()
-                    if not re.fullmatch(r"[A-Za-z0-9._$-]+", share):
-                        continue
-                    permission = ""
-                    remark = ""
-                    if len(cols) > 1:
-                        if cols[1] in {"READ", "WRITE", "READ,WRITE", "WRITE,READ"}:
-                            permission = cols[1]
-                            remark = cols[2] if len(cols) > 2 else ""
-                        else:
-                            remark = " ".join(cols[1:])
-                    add(f"{share:<16} {permission or '—':<10} {remark}".rstrip())
+                for share in parse_smb_shares(record.output):
+                    add(f"{share.name:<24} {share.display_permissions:<10} {share.remark}".rstrip())
 
             elif "--dir" in record.command:
                 share = record.command[record.command.index("--share") + 1] if "--share" in record.command else "?"
@@ -205,7 +184,7 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
                         detail += f" · {int(size):,} B"
                     add(f"{detail} · {modified}")
                 if not found:
-                    add("  no entries returned")
+                    add("  no parseable listing (empty, denied, or unsupported output)")
 
     elif proto == "ldap":
         for record in result.records:
@@ -253,6 +232,15 @@ def print_result_event(result: ProtocolResult, verbose: bool = False) -> None:
         f"{escape(result.proof)}",
         highlight=False,
     )
+
+    if result.protocol.lower() == "smb":
+        for record in result.records:
+            meta = smb_metadata(record.output)
+            if meta:
+                summary = " · ".join(f"{key}={meta[key]}" for key in
+                                     ("name", "domain", "signing", "SMBv1", "Null Auth") if key in meta)
+                console.print(f"      [dim]↳ {escape(summary)}[/dim]", highlight=False)
+                break
 
     if verbose:
         details = extract_verbose_details(result)
