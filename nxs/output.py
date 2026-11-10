@@ -90,7 +90,7 @@ def print_probe_summary(raw_target: str, targets: list[str], port_map: dict[str,
         for t in targets:
             protos = port_map.get(t, [])
             if protos:
-                names = ", ".join("RPC(135)" if p == "wmi" else p.upper() for p in protos)
+                names = ", ".join(p.upper() for p in protos)
                 console.print(f"  [bold]{t}[/bold]  [dim]{len(protos)}/{total}[/dim]  [cyan]{names}[/cyan]")
             elif verbose:
                 console.print(f"  [dim]{t}  0/{total}[/dim]")
@@ -98,7 +98,7 @@ def print_probe_summary(raw_target: str, targets: list[str], port_map: dict[str,
     else:
         t = targets[0]
         protos = port_map.get(t, [])
-        names = ", ".join("RPC(135)" if p == "wmi" else p.upper() for p in protos) if protos else "none"
+        names = ", ".join(p.upper() for p in protos) if protos else "none"
         domain_str = f" · [dim]{domain}[/dim]" if domain else ""
         console.print(
             f"\n[dim]nxs v{__version__}[/dim]"
