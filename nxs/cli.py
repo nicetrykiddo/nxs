@@ -248,6 +248,7 @@ def run_check(
     opsec: bool = False,
     list_files: bool = False,
     verify_exec: bool = False,
+    enum_users: bool = False,
 ):
     results = []
 
@@ -259,7 +260,7 @@ def run_check(
                 kerberos=kerberos, kdc_host=kdc_host,
                 debug=debug, delay=delay, remote_time=remote_time,
                 ipv6=ipv6, opsec=opsec, list_files=list_files,
-                verify_exec=verify_exec,
+                verify_exec=verify_exec, enum_users=enum_users,
             )
             for protocol in protocols
         ]
@@ -297,6 +298,7 @@ def main(
     opsec: bool = typer.Option(False, "--opsec", help="Sequential paced auth checks; skips automatic capability probes"),
     list_files: bool = typer.Option(False, "--list-files", help="List root entries of readable SMB shares, no recursion"),
     verify_exec: bool = typer.Option(False, "--verify-exec", help="Explicitly test WinRM PowerShell command execution"),
+    enum_users: bool = typer.Option(False, "--enum-users", help="Attempt SAMR user enumeration over authenticated SMB (not WMI)"),
     protocols: Optional[str] = typer.Option(None, "--protocols", help=f"Comma list ({PROTOCOL_LIST})"),
     local_auth: bool = typer.Option(False, "--local-auth", help="Local auth for SMB/WMI"),
     try_local: bool = typer.Option(False, "--try-local", help="Retry with --local-auth on unclear"),
@@ -426,7 +428,7 @@ def main(
                 kerberos=kerberos, kdc_host=kdc_host,
                 debug=debug, delay=delay, remote_time=remote_time,
                 ipv6=t in ipv6_targets, opsec=opsec,
-                list_files=list_files, verify_exec=verify_exec,
+                list_files=list_files, verify_exec=verify_exec, enum_users=enum_users,
             )
             if stream:
                 with _out_lock:
@@ -475,7 +477,7 @@ def main(
                 kerberos=kerberos, kdc_host=kdc_host,
                 debug=debug, delay=delay,
                 remote_time=remote_time,
-                ipv6=t in ipv6_targets, opsec=opsec, list_files=list_files, verify_exec=verify_exec,
+                ipv6=t in ipv6_targets, opsec=opsec, list_files=list_files, verify_exec=verify_exec, enum_users=enum_users,
             )
 
             if stream:
