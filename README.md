@@ -16,6 +16,34 @@ Requires [NetExec](https://github.com/Pennyw0rth/NetExec) (`nxc`) in PATH.
 
 ## Usage
 
+Credential-free discovery tries **anonymous** and **guest** independently on each
+reachable protocol. This is a small, fixed access check, **not** a password spray:
+
+```bash
+nxs dc01.example.test
+```
+
+SMB output shows readable/writable share names without requiring `--verbose`,
+including shares literally named `Shares` and names containing spaces. `--list-files`
+lists the **root only** of shares with READ access (not recursive), and `--enum-users`
+performs optional SMB/SAMR user enumeration:
+
+```bash
+nxs dc01.example.test -u guest -p '' --list-files --enum-users
+```
+
+A reachable TCP 135 endpoint is displayed as **RPC(135)**, not confirmed WMI
+management access. WMI `AUTH` alone is not proof of command execution or user enumeration.
+Authentication, share permissions, and command execution are reported separately.
+The `Null Auth` header is information advertised by NetExec and does not prove
+anonymous file access.
+
+Scan output, `--raw` JSON, `--debug` commands, and `--save` evidence redact
+passwords and hashes. Evidence files are private and uniquely named.
+When Nmap is absent, nxs uses direct TCP checks rather than assuming every port
+is open. Multi-credential scans check every supplied credential on every
+reachable protocol rather than skipping non-SMB-valid credentials.
+
 ```bash
 nxs 10.10.10.10 -u john.doe -p 'Password123' -d domain.local
 ```
@@ -111,7 +139,7 @@ nxs v0.1.0 10.10.10.10 · john.doe@domain.local · 4 protocols
   [-] WINRM  NO       Authentication failed
 ```
 
-With `--verbose`, detailed output is nested underneath:
+With `--verbose`, detailed output is nested underneath. It expands share tables, metadata, and optional directory/user listings:
 
 ```text
 nxs v0.1.0 10.10.10.10 · admin · 1 protocols
@@ -135,6 +163,16 @@ nxs v0.1.0 10.10.10.10 · admin · 1 protocols
 | `AUTH` | `[*]` | Authenticated, no further access |
 | `UNCLEAR` | `[?]` | Inconclusive result |
 | `NO` | `[-]` | Authentication failed or port closed |
+
+## Upgrading before a PyPI release
+
+The GitHub code can be installed directly via:
+
+```bash
+pipx install --force 'git+https://github.com/nicetrykiddo/nxs.git'
+```
+
+The PyPI package does not update until a release is published.
 
 ## License
 
