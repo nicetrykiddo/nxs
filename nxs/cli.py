@@ -247,7 +247,7 @@ def run_check(
     ipv6: bool = False,
     opsec: bool = False,
     list_files: bool = False,
-    verify_exec: bool = False,
+    verify_exec: bool = True,
     enum_users: bool = False,
 ):
     results = []
@@ -297,7 +297,7 @@ def main(
     combo: bool = typer.Option(False, "-C", "--combo", help="Try all user×password combinations"),
     opsec: bool = typer.Option(False, "--opsec", help="Sequential paced auth checks; skips automatic capability probes"),
     list_files: bool = typer.Option(False, "--list-files", help="List root entries of readable SMB shares, no recursion"),
-    verify_exec: bool = typer.Option(False, "--verify-exec", help="Explicitly test WinRM PowerShell command execution"),
+    verify_exec: bool = typer.Option(True, "--verify-exec/--no-verify-exec", help="Verify WinRM command execution (default: on; disabled in --opsec)"),
     enum_users: bool = typer.Option(False, "--enum-users", help="Attempt SAMR user enumeration over authenticated SMB (not WMI)"),
     protocols: Optional[str] = typer.Option(None, "--protocols", help=f"Comma list ({PROTOCOL_LIST})"),
     local_auth: bool = typer.Option(False, "--local-auth", help="Local auth for SMB/WMI"),
