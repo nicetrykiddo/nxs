@@ -198,6 +198,15 @@ PORT_MAP = {
     "nfs": "2049",
 }
 
+WINRM_HTTPS_PORT = "5986"
+
+
+def probe_port_map(protocols: list[str]) -> dict[str, str]:
+    ports = {PORT_MAP[p]: p for p in protocols if p in PORT_MAP}
+    if "winrm" in protocols:
+        ports[WINRM_HTTPS_PORT] = "winrm"
+    return ports
+
 class PortProbeError(RuntimeError):
     """Port probe failed; do not report it as no open ports."""
 
@@ -273,13 +282,12 @@ def probe_ports(target: str, protocols: list[str], timeout: int = 5) -> list[str
     """Quick TCP probe — returns only protocols whose ports are open."""
     nmap = shutil.which("nmap")
     if not nmap:
-        return [p for p in protocols if p in PORT_MAP and tcp_port_open(target, int(PORT_MAP[p]))]
+        return [p for p in protocols if any(tcp_port_open(target, int(port)) for port, proto in probe_port_map([p]).items() if proto == p)]
 
-    ports = [PORT_MAP[p] for p in protocols if p in PORT_MAP]
+    port_to_proto = probe_port_map(protocols)
+    ports = list(port_to_proto)
     if not ports:
         return protocols[:]
-
-    port_to_proto = {PORT_MAP[p]: p for p in protocols if p in PORT_MAP}
 
     try:
         result = subprocess.run(
@@ -343,15 +351,15 @@ def probe_ports_per_target(
     """Probe each IP family separately; correlate resolved IPs with input names."""
     nmap = shutil.which("nmap")
     if not nmap:
-        return {t: [p for p in protocols if p in PORT_MAP and tcp_port_open(t, int(PORT_MAP[p]))] for t in targets}
+        return {t: [p for p in protocols if any(tcp_port_open(t, int(port)) for port, proto in probe_port_map([p]).items() if proto == p)] for t in targets}
 
-    ports = [PORT_MAP[p] for p in protocols if p in PORT_MAP]
+    port_to_proto = probe_port_map(protocols)
+    ports = list(port_to_proto)
     if not ports:
         return {t: protocols[:] for t in targets}
 
     if ipv6_targets is None:
         ipv6_targets = {t for t in targets if target_uses_ipv6(t)}
-    port_to_proto = {PORT_MAP[p]: p for p in protocols if p in PORT_MAP}
     result_map = {t: [] for t in targets}
 
     for family, group in (
