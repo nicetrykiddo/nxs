@@ -95,7 +95,11 @@ def redact_record(record: CommandRecord) -> dict:
     ]
     output = record.output
     for secret in secrets_in_command:
-        output = output.replace(secret, "[REDACTED]")
+        if len(secret) >= 4:
+            output = output.replace(secret, "[REDACTED]")
+        else:
+            # A one-character password must not destroy every occurrence of that letter.
+            output = re.sub(r"(?<=:)" + re.escape(secret) + r"(?=\s|$|\()", "[REDACTED]", output)
     return {
         "command": redact_command(record.command),
         "returncode": record.returncode,
@@ -453,7 +457,11 @@ def auth_state(output: str, user: str, target: str, protocol: str) -> tuple[bool
     if success:
         return True, "guest mapped" if any("(Guest)" in x for x in success) else "auth ok"
     if failures:
-        return False, failures[0][:160]
+        error = failures[0]
+        first, _, tail = error.partition(" ")
+        if ":" in first and ("\\" in first or (user and first.startswith(user + ":"))):
+            error = tail or "authentication rejected"
+        return False, error[:160]
     return None, "no verified authentication response"
 
 
@@ -624,6 +632,8 @@ def test_protocol(
                 continue
 
             level, proof = "AUTH", "auth ok"
+            if protocol == "wmi":
+                proof = "NXC login accepted; WMI management rights unverified"
             if protocol == "winrm":
                 # NetExec only appends (Pwn3d!) after its WinRM WSMan
                 # shell enumeration check succeeds. This is strong evidence
@@ -728,6 +738,8 @@ def test_protocol(
                 all_records.append(exec_check)
                 level, proof = exec_capability(exec_check.output, marker)
 
+            if reason == "guest mapped":
+                proof += "; effective session: Guest"
             return ProtocolResult(protocol, level not in {"NO", "UNCLEAR"}, level, proof, "local" if mode else "domain", all_records)
 
     return ProtocolResult(protocol, False, "UNCLEAR", last_reason, "local" if local_auth else "domain", all_records)
