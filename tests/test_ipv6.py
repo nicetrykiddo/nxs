@@ -4,7 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from nxs.models import Credential
-from nxs.runner import PortProbeError, build_cmd, probe_ports_per_target, target_uses_ipv6
+from nxs.runner import PortProbeError, build_cmd, check_port_state, probe_ports_per_target, target_uses_ipv6
 
 
 def resolve(host, port, type=None):
@@ -76,6 +76,20 @@ class IPv6Tests(unittest.TestCase):
         self.assertEqual(probe_ports_per_target(["host"], ["winrm", "smb"]),
                          {"host": ["winrm"]})
         self.assertTrue(any(call.args[1] == 5986 for call in connect.call_args_list))
+
+    @patch("nxs.runner.shutil.which", return_value="/usr/bin/nmap")
+    @patch("nxs.runner.subprocess.run")
+    def test_winrm_5986_open_is_not_classified_closed(self, run, _which):
+        run.return_value = subprocess.CompletedProcess([], 0,
+            "5985/tcp closed wsman\\n5986/tcp open ssl/wsman", "")
+        self.assertEqual(check_port_state("10.0.0.4", "winrm"), "port open")
+
+    @patch("nxs.runner.shutil.which", return_value="/usr/bin/nmap")
+    @patch("nxs.runner.subprocess.run")
+    def test_winrm_closed_and_filtered_is_inconclusive(self, run, _which):
+        run.return_value = subprocess.CompletedProcess([], 0,
+            "5985/tcp closed wsman\\n5986/tcp filtered ssl/wsman", "")
+        self.assertEqual(check_port_state("10.0.0.4", "winrm"), "port closed / filtered")
 
     @patch("nxs.runner.shutil.which", return_value="/usr/bin/nmap")
     @patch("nxs.runner.subprocess.run")
