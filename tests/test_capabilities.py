@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from nxs.cli import resolve_credentials
 from nxs.models import CommandRecord, Credential, ProtocolResult
-from nxs.output import cred_label, extract_verbose_details
+from nxs.output import cred_label, extract_verbose_details, print_probe_summary, console
 from nxs.parsers import parse_smb_shares, smb_metadata
 from nxs.runner import (
     auth_state, exec_capability, probe_ports_per_target, redact_command,
@@ -191,6 +191,25 @@ class ScannerTests(unittest.TestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.level, "READ")
         self.assertIn("Enumerated 3", result.proof)
+
+    @patch("nxs.runner.find_nxc", return_value="nxc")
+    @patch("nxs.runner.run_command")
+    def test_ldap_search_denied_after_valid_bind_is_auth(self, run, _nxc):
+        run.return_value = CommandRecord(
+            [], 0,
+            "LDAP 10.0.0.1 389 DC01 [+] LAB\\alice:\n"
+            "LDAP 10.0.0.1 389 DC01 [-] insufficientAccessRights",
+        )
+        result = scan_protocol("dc01", "ldap", Credential("alice", password="test"))
+        self.assertEqual(result.level, "AUTH")
+        self.assertTrue(result.ok)
+
+    def test_no_port_probe_results_do_not_display_all_services(self):
+        with patch.object(console, "print") as printer:
+            print_probe_summary("host", ["host"], {"host": []}, ["smb", "ldap"])
+        result = " ".join(str(call) for call in printer.call_args_list)
+        self.assertIn("0/2", result)
+        self.assertIn("none", result)
 
     @patch("nxs.runner.shutil.which", return_value=None)
     @patch("nxs.runner.tcp_port_open", side_effect=lambda host, port: port == 445)
