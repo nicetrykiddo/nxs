@@ -580,7 +580,7 @@ def test_protocol(
     ipv6: bool = False,
     opsec: bool = False,
     list_files: bool = False,
-    verify_exec: bool = False,
+    verify_exec: bool = True,
     enum_users: bool = False,
 ) -> ProtocolResult:
     nxc = find_nxc()
@@ -626,19 +626,15 @@ def test_protocol(
             if protocol == "wmi":
                 proof = "NXC login accepted; WMI management rights unverified"
             if protocol == "winrm":
-                # NetExec only appends (Pwn3d!) after its WinRM WSMan
-                # shell enumeration check succeeds. This is strong evidence
-                # of likely shell access, not proof a command ran.
-                if any("[+]" in line and "(Pwn3d!)" in line
-                       for line in login.output.splitlines()):
-                    level, proof = "SHELL", "WinRM shell likely (WSMan check passed)"
-                else:
-                    proof = "WinRM authentication accepted; shell unverified"
+                shell_checked = any("[+]" in line and "(Pwn3d!)" in line
+                                    for line in login.output.splitlines())
+                proof = ("WSMan shell enumeration passed; command not tested"
+                         if shell_checked else "WinRM authenticated; shell unverified")
 
             if opsec and not (protocol == "smb" and (list_files or enum_users)):
-                if protocol == "winrm":
-                    return ProtocolResult(protocol, level not in {"NO", "UNCLEAR"}, level, proof, "local" if mode else "domain", all_records)
-                return ProtocolResult(protocol, True, "AUTH", "auth ok; capability checks skipped (--opsec)", "local" if mode else "domain", all_records)
+                return ProtocolResult(protocol, True, "AUTH",
+                                      "auth ok; capability checks skipped (--opsec)",
+                                      "local" if mode else "domain", all_records)
 
             if protocol == "smb":
                 shares = run_command(
@@ -704,13 +700,9 @@ def test_protocol(
                         timeout, debug, env=ccache_env, remote_time=remote_time,
                     )
                     all_records.append(executed)
-                    verified_level, exec_proof = exec_capability(executed.output, marker)
-                    if verified_level == "EXEC":
-                        level, proof = "EXEC", "PowerShell execution verified"
-                    elif level == "SHELL":
-                        proof += "; PowerShell verification failed"
-                    else:
-                        proof = exec_proof
+                    level, exec_proof = exec_capability(executed.output, marker)
+                    proof = ("PowerShell command output verified" if level == "EXEC"
+                             else "WinRM authenticated; " + exec_proof)
 
             elif protocol in {"ssh", "wmi"}:
                 marker = "NXS_VERIFY_" + secrets.token_hex(8)
