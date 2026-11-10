@@ -64,6 +64,21 @@ class IPv6Tests(unittest.TestCase):
 
     @patch("nxs.runner.shutil.which", return_value="/usr/bin/nmap")
     @patch("nxs.runner.subprocess.run")
+    def test_https_only_winrm_is_discovered(self, run, _which):
+        run.return_value = subprocess.CompletedProcess([], 0, xml("10.0.0.4", "ipv4", "5986"), "")
+        self.assertEqual(probe_ports_per_target(["10.0.0.4"], ["winrm", "smb"]),
+                         {"10.0.0.4": ["winrm"]})
+        self.assertIn("5986", run.call_args.args[0][run.call_args.args[0].index("-p") + 1])
+
+    @patch("nxs.runner.shutil.which", return_value=None)
+    @patch("nxs.runner.tcp_port_open", side_effect=lambda host, port: port == 5986)
+    def test_https_only_winrm_without_nmap(self, connect, _which):
+        self.assertEqual(probe_ports_per_target(["host"], ["winrm", "smb"]),
+                         {"host": ["winrm"]})
+        self.assertTrue(any(call.args[1] == 5986 for call in connect.call_args_list))
+
+    @patch("nxs.runner.shutil.which", return_value="/usr/bin/nmap")
+    @patch("nxs.runner.subprocess.run")
     def test_nmap_failure_not_zero_ports(self, run, _which):
         run.return_value = subprocess.CompletedProcess([], 1, "", "IPv6 scan failed")
         with self.assertRaisesRegex(PortProbeError, "IPv6 scan failed"):
