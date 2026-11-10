@@ -124,9 +124,9 @@ class ScannerTests(unittest.TestCase):
     @patch("nxs.runner.run_command")
     def test_optional_samr_enumeration_is_labeled(self, run, _nxc):
         run.side_effect = [
-            CommandRecord([], 0, BANNER + "\\n" + LOGIN),
+            CommandRecord([], 0, BANNER + "\n" + LOGIN),
             CommandRecord([], 0, SHARES),
-            CommandRecord([], 0, LOGIN + "\\nSMB host 445 DC01 [+] Enumerated 3 domain users"),
+            CommandRecord([], 0, LOGIN + "\nSMB host 445 DC01 [+] Enumerated 3 domain users"),
         ]
         res = scan_protocol("host", "smb", Credential("guest", password=""), enum_users=True)
         self.assertEqual(run.call_count, 3)
@@ -137,7 +137,7 @@ class ScannerTests(unittest.TestCase):
     def test_network_timeout_is_retried(self, run, _nxc):
         run.side_effect = [
             CommandRecord([], 124, "TIMEOUT"),
-            CommandRecord([], 0, BANNER + "\\n" + LOGIN),
+            CommandRecord([], 0, BANNER + "\n" + LOGIN),
             CommandRecord([], 0, SHARES),
         ]
         res = scan_protocol("host", "smb", Credential("guest", password=""), retries=1)
