@@ -51,12 +51,10 @@ def parse_smb_shares(output: str) -> list[ShareAccess]:
 
         if perms_at is not None:
             name = line[:perms_at].strip()
-            permission = line[perms_at:remark_at].strip() if remark_at else line[perms_at:].strip()
-            remark = line[remark_at:].strip() if remark_at else ""
-            # A displayed share can have blank permissions and a non-empty remark.
-            if permission not in PERMISSIONS:
-                remark = " ".join(x for x in (permission, remark) if x)
-                permission = ""
+            tail = line[perms_at:].strip()
+            match = re.match(r"^(READ,WRITE|WRITE,READ|READ|WRITE)(?=\\s|$)", tail)
+            permission = match.group(1) if match else ""
+            remark = tail[match.end():].strip() if match else tail
         else:
             columns = re.split(r"\s{2,}", line, maxsplit=2)
             if len(columns) < 2:
