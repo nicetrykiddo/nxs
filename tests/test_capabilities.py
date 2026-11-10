@@ -206,7 +206,7 @@ class ScannerTests(unittest.TestCase):
 
     def test_no_port_probe_results_do_not_display_all_services(self):
         with patch.object(console, "print") as printer:
-            print_probe_summary("host", ["host"], {"host": []}, ["smb", "ldap"])
+            print_probe_summary("host", ["host"], {}, ["smb", "ldap"])
         result = " ".join(str(call) for call in printer.call_args_list)
         self.assertIn("0/2", result)
         self.assertIn("none", result)
