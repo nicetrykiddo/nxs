@@ -584,6 +584,7 @@ def test_protocol(
     opsec: bool = False,
     list_files: bool = False,
     verify_exec: bool = False,
+    enum_users: bool = False,
 ) -> ProtocolResult:
     nxc = find_nxc()
     ccache_env = {**os.environ, "KRB5CCNAME": str(cred.ccache_file)} if cred.ccache_file else None
@@ -633,7 +634,7 @@ def test_protocol(
                 else:
                     proof = "WinRM authentication accepted; shell unverified"
 
-            if opsec and not (protocol == "smb" and list_files):
+            if opsec and not (protocol == "smb" and (list_files or enum_users)):
                 if protocol == "winrm":
                     return ProtocolResult(protocol, level not in {"NO", "UNCLEAR"}, level, proof, "local" if mode else "domain", all_records)
                 return ProtocolResult(protocol, True, "AUTH", "auth ok; capability checks skipped (--opsec)", "local" if mode else "domain", all_records)
@@ -663,6 +664,20 @@ def test_protocol(
                 else:
                     errors = [line.split("[-]", 1)[1].strip() for line in shares.output.splitlines() if "[-]" in line]
                     proof = ("share enumeration failed: " + errors[0][:100]) if errors else "share enumeration unverified"
+
+                if enum_users:
+                    users = run_command(
+                        build_cmd(nxc, "smb", target, cred, ["--users"], mode,
+                                  kerberos, kdc_host, ipv6=ipv6),
+                        timeout, debug, env=ccache_env, remote_time=remote_time,
+                    )
+                    all_records.append(users)
+                    match = re.search(r"Enumerated\s+\d+\s+(?:domain\s+)?users",
+                                      users.output, re.I)
+                    if match:
+                        proof += "; SAMR " + match.group(0)
+                    else:
+                        proof += "; SAMR users: unavailable or unverified"
 
             elif protocol == "ldap":
                 users = run_command(
@@ -713,6 +728,6 @@ def test_protocol(
                 all_records.append(exec_check)
                 level, proof = exec_capability(exec_check.output, marker)
 
-            return ProtocolResult(protocol, True, level, proof, "local" if mode else "domain", all_records)
+            return ProtocolResult(protocol, level not in {"NO", "UNCLEAR"}, level, proof, "local" if mode else "domain", all_records)
 
     return ProtocolResult(protocol, False, "UNCLEAR", last_reason, "local" if local_auth else "domain", all_records)
