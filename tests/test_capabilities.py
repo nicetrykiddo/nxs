@@ -37,7 +37,7 @@ class ShareParserTests(unittest.TestCase):
         self.assertIn("Shares", [r.name for r in rows])
         self.assertIn("Project Files", [r.name for r in rows])
         self.assertIn("Project  Files", [r.name for r in parse_smb_shares(
-            SHARES + "\\nSMB 10.129.14.147 445 DC01 Project  Files   READ"
+            SHARES + "\nSMB 10.129.14.147 445 DC01 Project  Files   READ"
         )])
         self.assertEqual(next(r for r in rows if r.name == "Project Files").display_permissions, "READ+WRITE")
         self.assertEqual(next(r for r in rows if r.name == "Write Only").display_permissions, "WRITE")
