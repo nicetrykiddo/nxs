@@ -14,9 +14,9 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 from .models import CommandRecord, Credential, ProtocolResult
+from .parsers import parse_smb_shares
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
-PERM_RE = re.compile(r"\s(?P<share>[A-Za-z0-9.$_-]+)\s+(?P<perm>READ,WRITE|READ|WRITE)(?:\s|$)")
 
 HARD_FAILS = (
     "STATUS_LOGON_FAILURE",
@@ -78,6 +78,31 @@ def find_nxc() -> str:
     return path
 
 
+def redact_command(command: list[str]) -> list[str]:
+    """Keep proof of invoked options without exposing credential material."""
+    sensitive = {"-p", "--password", "-H", "--hash", "--kdcHost"}
+    clean = list(command)
+    for idx, arg in enumerate(clean[:-1]):
+        if arg in sensitive:
+            clean[idx + 1] = "[REDACTED]"
+    return clean
+
+
+def redact_record(record: CommandRecord) -> dict:
+    secrets_in_command = [
+        record.command[i + 1] for i, x in enumerate(record.command[:-1])
+        if x in {"-p", "--password", "-H", "--hash"} and record.command[i + 1]
+    ]
+    output = record.output
+    for secret in secrets_in_command:
+        output = output.replace(secret, "[REDACTED]")
+    return {
+        "command": redact_command(record.command),
+        "returncode": record.returncode,
+        "output": output,
+    }
+
+
 def run_command(
     command: list[str],
     timeout: int,
@@ -95,7 +120,7 @@ def run_command(
     if remote_time and shutil.which("faketime"):
         command = ["faketime", remote_time] + command
     if debug:
-        print("[debug]", " ".join(command))
+        print("[debug]", " ".join(redact_command(command)))
     try:
         proc = subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
         with _proc_lock:
@@ -232,11 +257,19 @@ def check_port_state(target: str, protocol: str) -> str:
     return "port closed / filtered"
 
 
+def tcp_port_open(target: str, port: int, timeout: float = 1.5) -> bool:
+    try:
+        with socket.create_connection((target, port), timeout=timeout):
+            return True
+    except (OSError, TimeoutError):
+        return False
+
+
 def probe_ports(target: str, protocols: list[str], timeout: int = 5) -> list[str]:
     """Quick TCP probe — returns only protocols whose ports are open."""
     nmap = shutil.which("nmap")
     if not nmap:
-        return protocols[:]
+        return [p for p in protocols if p in PORT_MAP and tcp_port_open(target, int(PORT_MAP[p]))]
 
     ports = [PORT_MAP[p] for p in protocols if p in PORT_MAP]
     if not ports:
@@ -306,7 +339,7 @@ def probe_ports_per_target(
     """Probe each IP family separately; correlate resolved IPs with input names."""
     nmap = shutil.which("nmap")
     if not nmap:
-        return {t: protocols[:] for t in targets}
+        return {t: [p for p in protocols if p in PORT_MAP and tcp_port_open(t, int(PORT_MAP[p]))] for t in targets}
 
     ports = [PORT_MAP[p] for p in protocols if p in PORT_MAP]
     if not ports:
@@ -380,94 +413,63 @@ def probe_ports_per_target(
 
 
 def auth_state(output: str, user: str, target: str, protocol: str) -> tuple[bool | None, str]:
+    """Treat failed authentication separately from inconclusive transport.
+
+    The NXC banner and generic [+] status messages are never authentication proof.
+    """
     if not output.strip():
-        return False, check_port_state(target, protocol)
+        if target and protocol:
+            state = check_port_state(target, protocol)
+            if state == "port closed":
+                return False, state
+        return None, "empty response"
 
     low = output.lower()
-    user_low = user.lower()
-
     for fail in HARD_FAILS:
         if fail.lower() in low:
             return False, fail
 
-    if "nt_status_io_timeout" in low or "timeout" in low:
-        state = check_port_state(target, protocol)
-        if state in ("port closed", "port filtered", "port closed / filtered"):
-            return False, state
-        return False, "timeout"
-    if "connection refused" in low:
-        return False, check_port_state(target, protocol)
-    if "no route" in low or "unreachable" in low:
-        return False, "unreachable"
+    if any(x in low for x in ("nt_status_io_timeout", "timeout", "connection refused",
+                              "no route", "unreachable")):
+        return None, "connection timed out or unavailable"
 
-    success_lines = [line for line in output.splitlines() if "[+]" in line]
-    failure_lines = [line for line in output.splitlines() if "[-]" in line]
-
-    if user_low and any(user_low in line.lower() for line in success_lines):
-        return True, "auth ok"
-    if success_lines:
-        return True, "auth ok"
-
-    def _extract_reason(line: str) -> str:
+    success = []
+    failures = []
+    for line in output.splitlines():
+        if "[+]" in line:
+            after = line.split("[+]", 1)[1].strip()
+            # Auth lines are of the form DOMAIN\\user: or user:password.
+            m = re.match(r"^(?:[^\\\s]+\\)?(?P<name>[^:\s]*):", after)
+            if m and m.group("name").casefold() == user.casefold():
+                success.append(after)
+            # NXC can map an arbitrary supplied name to Guest.
+            elif m and "(Guest)" in after and user and m.group("name").casefold() == user.casefold():
+                success.append(after)
+            elif "(Pwn3d!)" in after and user and user.casefold() in after.casefold():
+                success.append(after)
         if "[-]" in line:
-            msg = line.split("[-]", 1)[1].strip()
-            
-            # Split out words to check if the first one is the username
-            parts = msg.split()
-            if parts:
-                first_word = parts[0].lower()
-                # The username might have a domain prefix: DOMAIN\user
-                if user_low and (user_low in first_word or first_word in user_low):
-                    msg = " ".join(parts[1:])
-                    # Clean up Kerberos ccache specific clutter
-                    if msg.startswith("from ccache "):
-                        msg = msg[12:]
-            return msg or "auth failed"
-        return "auth failed"
+            failures.append(line.split("[-]", 1)[1].strip())
 
-    for line in failure_lines:
-        if user_low and user_low in line.lower():
-            return False, _extract_reason(line)
-            
-    if failure_lines:
-        return False, _extract_reason(failure_lines[0])
-
-    return None, "no clear auth result"
+    if success:
+        return True, "guest mapped" if any("(Guest)" in x for x in success) else "auth ok"
+    if failures:
+        return False, failures[0][:160]
+    return None, "no verified authentication response"
 
 
 def smb_capability(output: str) -> tuple[str, str]:
-    shares: list[str] = []
-    is_admin = False
-
-    for line in output.splitlines():
-        match = PERM_RE.search(line)
-        if not match:
-            continue
-
-        share = match.group("share")
-        perm = match.group("perm")
-
-        if share.upper() in {"ADMIN$", "C$"} and "WRITE" in perm:
-            is_admin = True
-
-        if share.upper() in {"IPC$", "ADMIN$", "C$"}:
-            continue
-
-        shares.append(f"{share}[{perm.replace(',', '+')}]")
-
-    if is_admin:
-        admin_shares = []
-        for line in output.splitlines():
-            match = PERM_RE.search(line)
-            if match and match.group("share").upper() in {"ADMIN$", "C$"} and "WRITE" in match.group("perm"):
-                admin_shares.append(f'{match.group("share")}[{match.group("perm").replace(",", "+")}]')
-        return "ADMIN", ", ".join(admin_shares + shares)
-    if any("WRITE" in item for item in shares):
-        return "WRITE", ", ".join(shares)
-    if shares:
-        return "READ", ", ".join(shares)
-
-    return "AUTH", "auth ok"
+    shares = parse_smb_shares(output)
+    usable = [s for s in shares if s.name.upper() not in {"IPC$", "ADMIN$", "C$"}
+              and s.permissions]
+    admin = [s for s in shares if s.name.upper() in {"ADMIN$", "C$"}
+             and "WRITE" in s.permissions]
+    if admin:
+        return "ADMIN", ", ".join(f"{s.name}[{s.display_permissions}]" for s in admin + usable)
+    if any("WRITE" in s.permissions for s in usable):
+        return "WRITE", ", ".join(f"{s.name}[{s.display_permissions}]" for s in usable)
+    if usable:
+        return "READ", ", ".join(f"{s.name}[{s.display_permissions}]" for s in usable)
+    return "AUTH", "shares enumerated; no readable/writable disk shares"
 
 
 def ldap_capability(output: str) -> tuple[str, str]:
@@ -479,13 +481,13 @@ def ldap_capability(output: str) -> tuple[str, str]:
 
 def exec_capability(output: str, marker: str) -> tuple[str, str]:
     low = output.lower()
-    if any(item.lower() in low for item in EXEC_DENIED):
-        return "AUTH", "exec denied"
     # NXC may report a failed CMD invocation before successfully falling back
     # to PowerShell, so positive proof takes precedence over earlier errors.
     for line in output.splitlines():
         if line.rstrip().endswith(marker) and not any(x in line for x in ("[+]", "[*]", "[-]")):
             return "EXEC", "command execution verified"
+    if any(item.lower() in low for item in EXEC_DENIED):
+        return "AUTH", "exec denied"
     for line in output.splitlines():
         if "[-]" in line:
             reason = line.split("[-]", 1)[1].strip()
@@ -513,19 +515,19 @@ def ldap_problem(output: str) -> tuple[str, str] | None:
 
 
 def save_records(save_dir: Path, target: str, user: str, result: ProtocolResult) -> None:
+    """Save redacted evidence with private permissions and unique names."""
     safe_target = re.sub(r"[^A-Za-z0-9_.-]", "_", target)
-    safe_user = re.sub(r"[^A-Za-z0-9_.-]", "_", user)
-
+    safe_user = re.sub(r"[^A-Za-z0-9_.-]", "_", user) or "anonymous"
     base = save_dir / safe_target / safe_user
-    base.mkdir(parents=True, exist_ok=True)
+    base.mkdir(mode=0o700, parents=True, exist_ok=True)
+    base.chmod(0o700)
 
     for idx, record in enumerate(result.records, start=1):
-        path = base / f"{result.protocol}_{idx}.txt"
-        path.write_text(
-            "$ " + " ".join(record.command) + "\n\n" + record.output,
-            encoding="utf-8",
-            errors="replace",
-        )
+        data = redact_record(record)
+        path = base / f"{result.protocol}_{secrets.token_hex(6)}_{idx}.txt"
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as stream:
+            stream.write("$ " + " ".join(data["command"]) + "\n\n" + data["output"])
 
 
 def get_remote_time(target: str) -> str | None:
@@ -613,6 +615,8 @@ def test_protocol(
             last_reason = reason
 
             if ok is False:
+                if mode != modes[-1]:
+                    break
                 return ProtocolResult(protocol, False, "NO", reason, "local" if mode else "domain", all_records)
 
             if ok is not True:
@@ -631,7 +635,7 @@ def test_protocol(
 
             if opsec and not (protocol == "smb" and list_files):
                 if protocol == "winrm":
-                    return ProtocolResult(protocol, True, level, proof, "local" if mode else "domain", all_records)
+                    return ProtocolResult(protocol, level not in {"NO", "UNCLEAR"}, level, proof, "local" if mode else "domain", all_records)
                 return ProtocolResult(protocol, True, "AUTH", "auth ok; capability checks skipped (--opsec)", "local" if mode else "domain", all_records)
 
             if protocol == "smb":
@@ -644,15 +648,12 @@ def test_protocol(
                 )
                 all_records.append(shares)
 
-                share_ok, _ = auth_state(shares.output, cred.user, "", "")
-                if share_ok and "Enumerated shares" in shares.output:
+                if "Enumerated shares" in shares.output:
                     level, proof = smb_capability(shares.output)
                     if list_files:
-                        readable = []
-                        for line in shares.output.splitlines():
-                            match = PERM_RE.search(line)
-                            if match and "READ" in match.group("perm") and match.group("share").upper() != "IPC$":
-                                readable.append(match.group("share"))
+                        readable = [s.name for s in parse_smb_shares(shares.output)
+                                    if "READ" in s.permissions and s.name.upper() not in
+                                    {"IPC$", "ADMIN$", "C$"}]
                         for share in dict.fromkeys(readable):
                             listing = run_command(
                                 build_cmd(nxc, protocol, target, cred, ["--share", share, "--dir"], mode, kerberos, kdc_host, ipv6=ipv6),
