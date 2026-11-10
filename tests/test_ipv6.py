@@ -81,14 +81,14 @@ class IPv6Tests(unittest.TestCase):
     @patch("nxs.runner.subprocess.run")
     def test_winrm_5986_open_is_not_classified_closed(self, run, _which):
         run.return_value = subprocess.CompletedProcess([], 0,
-            "5985/tcp closed wsman\\n5986/tcp open ssl/wsman", "")
+            "5985/tcp closed wsman\n5986/tcp open ssl/wsman", "")
         self.assertEqual(check_port_state("10.0.0.4", "winrm"), "port open")
 
     @patch("nxs.runner.shutil.which", return_value="/usr/bin/nmap")
     @patch("nxs.runner.subprocess.run")
     def test_winrm_closed_and_filtered_is_inconclusive(self, run, _which):
         run.return_value = subprocess.CompletedProcess([], 0,
-            "5985/tcp closed wsman\\n5986/tcp filtered ssl/wsman", "")
+            "5985/tcp closed wsman\n5986/tcp filtered ssl/wsman", "")
         self.assertEqual(check_port_state("10.0.0.4", "winrm"), "port closed / filtered")
 
     @patch("nxs.runner.shutil.which", return_value="/usr/bin/nmap")
