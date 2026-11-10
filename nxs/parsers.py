@@ -30,45 +30,39 @@ def clean_nxc_line(line: str) -> str:
 
 
 def parse_smb_shares(output: str) -> list[ShareAccess]:
-    """Parse NXC's aligned share table without dropping valid names."""
-    started = False
-    perms_at = None
-    remark_at = None
+    """Parse permission-bearing share rows without assuming fixed column widths."""
+    announced = False
+    in_table = False
     rows: list[ShareAccess] = []
     for raw in output.splitlines():
         line = clean_nxc_line(raw)
         if "Enumerated shares" in line:
-            started = True
+            announced = True
+            in_table = False
             continue
-        if not started or not line or line.startswith(("[", "SMB ")):
+        if announced and re.match(r"^Share\s{2,}Permissions\b", line):
+            in_table = True
             continue
-        if re.match(r"^Share\s{2,}Permissions(?:\s{2,}Remark)?$", line):
-            perms_at = line.index("Permissions")
-            remark_at = line.index("Remark") if "Remark" in line else None
+        if not in_table or not line or line.startswith(("[", "SMB ")):
             continue
         if re.fullmatch(r"[-\s]+", line):
             continue
 
-        if perms_at is not None:
-            name = line[:perms_at].strip()
-            tail = line[perms_at:].strip()
-            match = re.match(r"^(READ,WRITE|WRITE,READ|READ|WRITE)(?=\s|$)", tail)
-            permission = match.group(1) if match else ""
-            remark = tail[match.end():].strip() if match else tail
+        match = re.match(
+            r"^(.*\S)\s{2,}(READ,WRITE|WRITE,READ|READ|WRITE)(?:\s{2,}(.*))?$",
+            line,
+        )
+        if match:
+            name, perms, remark = match.groups()
         else:
-            columns = re.split(r"\s{2,}", line, maxsplit=2)
-            if len(columns) < 2:
-                continue
-            name = columns[0].strip()
-            permission = columns[1] if columns[1] in PERMISSIONS else ""
-            remark = columns[2] if len(columns) > 2 else ""
-            if not permission:
-                remark = " ".join(columns[1:])
+            parts = re.split(r"\s{2,}", line, maxsplit=1)
+            name, perms, remark = parts[0], "", parts[1] if len(parts) > 1 else ""
 
-        if not name or not re.fullmatch(r"[^\\/\x00-\x1f]+", name):
-            continue
-        rows.append(ShareAccess(name, frozenset(permission.split(",")) if permission else frozenset(), remark))
+        if name and re.fullmatch(r"[^\\/\x00-\x1f]+", name):
+            rows.append(ShareAccess(name, frozenset(perms.split(",")) if perms else frozenset(), remark or ""))
     return rows
+
+
 
 def smb_metadata(output: str) -> dict[str, str]:
     """Return metadata exactly as NXC advertised it, without interpreting policy."""
