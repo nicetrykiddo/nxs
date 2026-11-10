@@ -241,34 +241,29 @@ def target_uses_ipv6(target: str, force_ipv6: bool = False) -> bool:
 
 
 def check_port_state(target: str, protocol: str) -> str:
-    port = PORT_MAP.get(protocol)
-    if not port:
-        return "port closed / filtered"
-
+    ports = list(probe_port_map([protocol]))
     nmap = shutil.which("nmap")
-    if not nmap:
+    if not ports or not nmap:
         return "port closed / filtered"
 
     try:
         result = subprocess.run(
-            [nmap] + (["-6"] if target_uses_ipv6(target) else []) + ["-sT", "-Pn", "-p", port, target],
-            capture_output=True,
-            text=True,
-            timeout=5
+            [nmap] + (["-6"] if target_uses_ipv6(target) else []) +
+            ["-sT", "-Pn", "-p", ",".join(ports), target],
+            capture_output=True, text=True, timeout=5,
         )
+        seen_closed = False
         for line in result.stdout.splitlines():
-            if f"{port}/tcp" in line:
-                if "filtered" in line:
-                    return "port filtered"
-                elif "closed" in line:
-                    return "port closed"
-                elif "open" in line:
+            if any(f"{port}/tcp" in line for port in ports):
+                if "open" in line and "filtered" not in line:
                     return "port open"
-    except Exception:
+                if "closed" in line:
+                    seen_closed = True
+        if seen_closed and all(f"{port}/tcp" in result.stdout for port in ports):
+            return "port closed"
+    except (OSError, subprocess.TimeoutExpired):
         pass
-
     return "port closed / filtered"
-
 
 def tcp_port_open(target: str, port: int, timeout: float = 1.5) -> bool:
     try:
