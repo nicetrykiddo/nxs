@@ -597,12 +597,14 @@ def test_protocol(
             )
 
             all_records.append(login)
+            ok, reason = auth_state(login.output, cred.user, target, protocol)
             if protocol == "ldap":
                 issue = ldap_problem(login.output)
                 if issue:
                     state, message = issue
-                    return ProtocolResult(protocol, False, state, message, "local" if mode else "domain", all_records)
-            ok, reason = auth_state(login.output, cred.user, target, protocol)
+                    if state == "AUTH" and ok is not True:
+                        state = "UNCLEAR"
+                    return ProtocolResult(protocol, state == "AUTH", state, message, "local" if mode else "domain", all_records)
             last_reason = reason
 
             if ok is False:
