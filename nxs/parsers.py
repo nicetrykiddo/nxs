@@ -52,7 +52,7 @@ def parse_smb_shares(output: str) -> list[ShareAccess]:
         if perms_at is not None:
             name = line[:perms_at].strip()
             tail = line[perms_at:].strip()
-            match = re.match(r"^(READ,WRITE|WRITE,READ|READ|WRITE)(?=\\s|$)", tail)
+            match = re.match(r"^(READ,WRITE|WRITE,READ|READ|WRITE)(?=\s|$)", tail)
             permission = match.group(1) if match else ""
             remark = tail[match.end():].strip() if match else tail
         else:
