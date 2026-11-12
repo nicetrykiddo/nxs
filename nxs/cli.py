@@ -161,9 +161,9 @@ def resolve_credentials(
     if user is None:
         if password is not None or ntlm_hash is not None:
             raise typer.BadParameter("provide -u/--user when passing a password or hash")
-        # No credentials is a deliberate anonymous/guest SMB discovery path.
-        return [Credential(user="", password="", domain=domain),
-                Credential(user="guest", password="", domain=domain)]
+        # No supplied credentials: check the guest identity only.
+        # A null session remains available explicitly via --null-session.
+        return [Credential(user="guest", password="", domain=domain)]
 
     if password is not None and ntlm_hash is not None:
         raise typer.BadParameter("use either --password or --hash, not both")
@@ -289,7 +289,7 @@ def _make_stream_handler(verbose: bool):
 
 @app.command()
 def main(
-    target: str = typer.Argument(..., help="Target IP, hostname, CIDR, or file. No credentials: anonymous + guest discovery"),
+    target: str = typer.Argument(..., help="Target IP, hostname, CIDR, or file. No credentials: guest discovery"),
     creds_file: Optional[str] = typer.Option(None, "-f", "--file", help="Optional file with user:pass or user:hash lines"),
     user: Optional[str] = typer.Option(None, "-u", "--user", help="Username or file with usernames"),
     password: Optional[str] = typer.Option(None, "-p", "--password", help="Password or file with passwords"),
@@ -302,7 +302,7 @@ def main(
     list_files: bool = typer.Option(False, "--list-files", help="List root entries of readable SMB shares, no recursion"),
     verify_exec: bool = typer.Option(True, "--verify-exec/--no-verify-exec", help="Verify WinRM command execution (default: on; disabled in --opsec)"),
     enum_users: bool = typer.Option(False, "--enum-users", help="Attempt SAMR user enumeration over authenticated SMB (not WMI)"),
-    null_session: bool = typer.Option(False, "--null-session", help="Test only empty username/password (no guest fallback)"),
+    null_session: bool = typer.Option(False, "--null-session", help="Explicitly test a null session (empty username and password)"),
     protocols: Optional[str] = typer.Option(None, "--protocols", help=f"Comma list ({PROTOCOL_LIST})"),
     local_auth: bool = typer.Option(False, "--local-auth", help="Local auth for SMB/WMI"),
     try_local: bool = typer.Option(False, "--try-local", help="Retry with --local-auth on unclear"),
@@ -429,7 +429,7 @@ def main(
         workers = 1 if opsec else min(len(pairs), 10)
 
         if discovery_mode:
-            # Preserve anonymous + guest discovery as a separate capability scan.
+            # Retained for callers supplying multiple discovery identities.
             discovered: dict[str, dict[str, list]] = {}
             def _discover(index: int):
                 t, cr = pairs[index]
