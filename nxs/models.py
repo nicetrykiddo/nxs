@@ -33,9 +33,8 @@ class ProtocolResult:
     def public_dict(self, raw: bool = False) -> dict[str, Any]:
         data = asdict(self)
         if raw:
-            # Raw proof still must not contain plaintext CLI secrets.
-            from .runner import redact_record
-            data["records"] = [redact_record(record) for record in self.records]
+            from .runner import record_dict
+            data["records"] = [record_dict(record) for record in self.records]
         else:
             data.pop("records", None)
         return data
