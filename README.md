@@ -159,6 +159,33 @@ nxs v0.1.0 10.10.10.10 · admin · 1 protocols
       ↳ domain\admin      S-1-5-21-3623811015-3361044348-30300820-500
 ```
 
+## Compact credential checks
+
+With `-C`, credential validation is displayed **one pair per line** as checks
+complete. No blank block per failed login. Usernames and passwords are shown
+in full, while error messages use protocol failure codes rather than echoed
+passwords. Only after all credentials have been checked does `nxs` probe
+capabilities for verified logins:
+
+```text
+nxs v0.4.4 domain.test · probe: 4/10 ports open · WMI, LDAP, SMB, WINRM
+
+Credential checks (3 pairs)
+  [-] alice:badpass NO  LDAP: STATUS_LOGON_FAILURE
+  [?] bob:guess UNCLEAR  LDAP: bind required (000004DC); SMB: guest fallback
+  [+] carol:goodpass VALID  verified via LDAP: auth ok
+
+domain.test · carol:goodpass · 4 protocols
+  [+] LDAP   READ     Enumerated 3 users
+
+Credential pairs: 3 · verified: 1 · rejected: 1 · inconclusive: 1
+```
+
+`--verbose` expands capability evidence for verified credentials without
+turning rejected combinations into multi-line blocks. `--json` retains every
+credential, validation outcome, and available raw record. `--no-auth-gate`
+explicitly bypasses the credential-first check for protocol-specific accounts.
+
 ## Access Levels
 
 | Level | Marker | Meaning |
