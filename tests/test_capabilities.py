@@ -283,6 +283,73 @@ class ScannerTests(unittest.TestCase):
         self.assertIn('"level": "NO"', response.output)
         scan.assert_not_called()
 
+    def test_combo_default_only_prints_verified_hits_and_summary(self):
+        with tempfile.TemporaryDirectory() as directory:
+            users = Path(directory) / "users.txt"
+            users.write_text("alice\nbob\ncarol\n")
+            gates = {
+                "alice": ProtocolResult("cred", False, "NO", "LDAP: STATUS_LOGON_FAILURE"),
+                "bob": ProtocolResult("cred", False, "UNCLEAR", "guest fallback, credential not verified"),
+                "carol": ProtocolResult("cred", True, "AUTH", "verified via LDAP: auth ok"),
+            }
+
+            def gate(target, credential, protocols, timeout, **kwargs):
+                return gates[credential.user]
+
+            with patch("nxs.cli.resolve_targets", return_value=["host"]), \
+                 patch("nxs.cli._probe_targets", return_value={"host": ["ldap", "smb"]}), \
+                 patch("nxs.cli.verify_credential", side_effect=gate) as verify, \
+                 patch("nxs.cli.run_check",
+                       return_value=[ProtocolResult("ldap", True, "READ", "Enumerated 3 users")]) as scans, \
+                 patch("nxs.cli.print_scan_header") as headers, \
+                 patch("nxs.cli.print_result_event") as rows, \
+                 patch.object(console, "print") as outputs:
+                result = CliRunner().invoke(app, ["host", "-u", str(users), "-p", "correct", "-C"])
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertEqual(verify.call_count, 3)
+                self.assertEqual(scans.call_count, 1)
+                self.assertEqual(headers.call_count, 1)
+                self.assertEqual(headers.call_args.args[1].user, "carol")
+                self.assertEqual([c.args[0].level for c in rows.call_args_list], ["AUTH", "READ"])
+                shown = "\n".join(str(c) for c in outputs.call_args_list)
+                self.assertIn("verified: 1", shown)
+                self.assertIn("rejected: 1", shown)
+                self.assertIn("inconclusive: 1", shown)
+                self.assertNotIn("STATUS_LOGON_FAILURE", shown)
+
+    def test_combo_verbose_prints_failure_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            users = Path(directory) / "users.txt"
+            users.write_text("alice\nbob\n")
+            with patch("nxs.cli.resolve_targets", return_value=["host"]), \
+                 patch("nxs.cli._probe_targets", return_value={"host": ["ldap"]}), \
+                 patch("nxs.cli.verify_credential", side_effect=[
+                     ProtocolResult("cred", False, "NO", "LDAP: STATUS_LOGON_FAILURE"),
+                     ProtocolResult("cred", False, "UNCLEAR", "LDAP: bind required"),
+                 ]), \
+                 patch("nxs.cli.run_check") as scans, \
+                 patch("nxs.cli.print_scan_header") as headers, \
+                 patch("nxs.cli.print_result_event") as rows:
+                result = CliRunner().invoke(app, ["host", "-u", str(users), "-p", "wrong", "-C", "--verbose"])
+                self.assertEqual(result.exit_code, 0, result.output)
+                self.assertEqual(headers.call_count, 2)
+                self.assertCountEqual([c.args[0].level for c in rows.call_args_list], ["NO", "UNCLEAR"])
+                scans.assert_not_called()
+
+    def test_quiet_output_keeps_credentials_on_hits(self):
+        from nxs.output import print_results
+        valid = Credential("alice", password="visible-secret")
+        with patch("builtins.print") as out:
+            print_results("host", valid, [
+                ProtocolResult("cred", True, "AUTH", "verified via LDAP"),
+                ProtocolResult("smb", False, "NO", "STATUS_LOGON_FAILURE"),
+            ], quiet=True)
+        self.assertEqual(out.call_count, 1)
+        text = out.call_args.args[0]
+        self.assertIn("alice:visible-secret", text)
+        self.assertIn("CRED AUTH", text)
+        self.assertNotIn("STATUS_LOGON_FAILURE", text)
+
     def test_no_port_probe_results_do_not_display_all_services(self):
         with patch.object(console, "print") as printer:
             print_probe_summary("host", ["host"], {}, ["smb", "ldap"])
