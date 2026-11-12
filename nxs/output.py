@@ -76,6 +76,34 @@ def print_scan_header(target: str, cred: Credential, domain: str | None, protoco
     )
 
 
+
+def print_credential_check(
+    target: str,
+    cred: Credential,
+    result: ProtocolResult,
+    *,
+    show_target: bool = False,
+) -> None:
+    """One uninterrupted terminal line per credential validation attempt."""
+    if result.ok:
+        mark, status, color = "[+]", "VALID", "green"
+    elif result.level == "NO":
+        mark, status, color = "[-]", "NO", "red"
+    else:
+        mark, status, color = "[?]", "UNCLEAR", "yellow"
+
+    identity = cred_label(cred)
+    prefix = f"{target} " if show_target else ""
+    # Clean layout, not content: keep every character of the supplied secret.
+    reason = " ".join(result.proof.splitlines()).removeprefix("no verified login; ")
+    console.print(
+        f"  [{color}]{mark}[/{color}] {escape(prefix + identity)} "
+        f"[{color}]{status}[/{color}]  {escape(reason)}",
+        highlight=False,
+        soft_wrap=True,
+    )
+
+
 def print_probe_summary(raw_target: str, targets: list[str], port_map: dict[str, list[str]], all_protocols: list[str], domain: str | None = None, verbose: bool = False) -> None:
     multi = len(targets) > 1
     total = len(all_protocols)
