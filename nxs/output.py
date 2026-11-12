@@ -61,6 +61,9 @@ def cred_label(cred: Credential) -> str:
     if cred.ntlm_hash is not None:
         return f"{who}:{cred.ntlm_hash}"
     if cred.password is not None:
+        # Blank password guest scans should display 'guest', not 'guest:'.
+        if cred.password == "":
+            return who if cred.user else "null session"
         return f"{who}:{cred.password}"
     return who
 
