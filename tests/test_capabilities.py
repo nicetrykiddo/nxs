@@ -265,7 +265,7 @@ class ScannerTests(unittest.TestCase):
     @patch("nxs.runner.run_command")
     def test_gate_stops_invalid_ldap_credential(self, run, _nxc):
         run.return_value = CommandRecord([], 0,
-            "LDAP host 389 DC01 [-] LAB\\alice:badpass STATUS_LOGON_FAILURE")
+            "SMB host 445 DC01 [-] LAB\\alice:badpass STATUS_LOGON_FAILURE")
         result = verify_credential("host", Credential("alice", password="badpass"), ["ldap", "smb"])
         self.assertFalse(result.ok)
         self.assertEqual(result.level, "NO")
@@ -276,23 +276,20 @@ class ScannerTests(unittest.TestCase):
     @patch("nxs.runner.run_command")
     def test_gate_accepts_ldap_and_checks_no_second_protocol(self, run, _nxc):
         run.return_value = CommandRecord([], 0,
-            "LDAP host 389 DC01 [+] LAB\\alice:goodpass")
+            "SMB host 445 DC01 [+] LAB\\alice:goodpass")
         result = verify_credential("host", Credential("alice", password="goodpass"), ["ldap", "smb"])
         self.assertTrue(result.ok)
         self.assertEqual(run.call_count, 1)
-        self.assertIn("LDAP", result.proof)
+        self.assertIn("SMB", result.proof)
 
     @patch("nxs.runner.find_nxc", return_value="nxc")
     @patch("nxs.runner.run_command")
     def test_gate_rejects_guest_fallback_as_real_auth(self, run, _nxc):
-        run.side_effect = [
-            CommandRecord([], 0, "LDAP host [-] bind required (000004DC)"),
-            CommandRecord([], 0, "SMB host [+] LAB\\alice:guess (Guest)"),
-        ]
+        run.return_value = CommandRecord([], 0, "SMB host [+] LAB\\alice:guess (Guest)")
         result = verify_credential("host", Credential("alice", password="guess"), ["ldap", "smb"])
         self.assertFalse(result.ok)
-        self.assertEqual(result.level, "UNCLEAR")
-        self.assertEqual(run.call_count, 2)
+        self.assertEqual(result.level, "GUEST")
+        self.assertEqual(run.call_count, 1)
 
     @patch("nxs.cli.verify_credential")
     @patch("nxs.cli.run_check")
@@ -312,7 +309,7 @@ class ScannerTests(unittest.TestCase):
             users.write_text("alice\nbob\ncarol\n")
             gates = {
                 "alice": ProtocolResult("cred", False, "NO", "LDAP: STATUS_LOGON_FAILURE"),
-                "bob": ProtocolResult("cred", False, "UNCLEAR", "guest fallback, credential not verified"),
+                "bob": ProtocolResult("cred", False, "GUEST", "SMB: mapped to Guest, password not verified"),
                 "carol": ProtocolResult("cred", True, "AUTH", "verified via LDAP: auth ok"),
             }
 
@@ -346,9 +343,10 @@ class ScannerTests(unittest.TestCase):
                 self.assertEqual([c.args[0].level for c in rows.call_args_list], ["READ"])
                 shown = "\n".join(str(c) for c in outputs.call_args_list)
                 self.assertIn("verified: 1", shown)
-                self.assertIn("rejected: 1", shown)
-                self.assertIn("inconclusive: 1", shown)
-                self.assertCountEqual([call.args[2].level for call in lines.call_args_list], ["NO", "UNCLEAR", "AUTH"])
+                self.assertIn("failed: 1", shown)
+                self.assertIn("guest: 1", shown)
+                self.assertIn("errors: 0", shown)
+                self.assertCountEqual([call.args[2].level for call in lines.call_args_list], ["NO", "GUEST", "AUTH"])
 
     def test_combo_verbose_prints_failure_diagnostics(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -358,7 +356,7 @@ class ScannerTests(unittest.TestCase):
                  patch("nxs.cli._probe_targets", return_value={"host": ["ldap"]}), \
                  patch("nxs.cli.verify_credential", side_effect=[
                      ProtocolResult("cred", False, "NO", "LDAP: STATUS_LOGON_FAILURE"),
-                     ProtocolResult("cred", False, "UNCLEAR", "LDAP: bind required"),
+                     ProtocolResult("cred", False, "ERROR", "LDAP: bind required"),
                  ]), \
                  patch("nxs.cli.run_check") as scans, \
                  patch("nxs.cli.print_scan_header") as headers, \
@@ -373,7 +371,7 @@ class ScannerTests(unittest.TestCase):
         from nxs.output import print_credential_check
         cred = Credential("alice", password="test-pass")
         state = ProtocolResult(
-            "cred", False, "UNCLEAR",
+            "cred", False, "ERROR",
             "no verified login; LDAP: bind required; SMB: guest fallback",
         )
         with patch.object(console, "print") as printer:
@@ -381,7 +379,7 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(printer.call_count, 1)
         line = printer.call_args.args[0]
         self.assertIn("alice:test-pass", line)
-        self.assertIn("UNCLEAR", line)
+        self.assertIn("ERROR", line)
         self.assertIn("LDAP: bind required", line)
         self.assertIn("SMB: guest fallback", line)
         self.assertNotIn("no verified login;", line)
