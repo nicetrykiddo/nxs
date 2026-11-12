@@ -403,65 +403,110 @@ def probe_ports_per_target(
     return result_map
 
 
-def auth_state(output: str, user: str, target: str, protocol: str) -> tuple[bool | None, str]:
-    """Verify a login, never confuse the echoed password with an error reason."""
+def auth_state(
+    output: str, user: str, target: str, protocol: str, *, secret: str | None = None,
+) -> tuple[bool | None, str]:
+    """Classify NetExec authentication evidence, never an echoed password.
+
+    A matching [+] login verifies authentication. A matching [-] login is
+    rejected only when NetExec's protocol-specific failure is conclusive.
+    Diagnostic, transport and unrelated command errors remain inconclusive.
+    """
     if not output.strip():
         if target and protocol and check_port_state(target, protocol) == "port closed":
             return None, "port closed"
         return None, "empty response"
 
-    low = output.lower()
-    for error in HARD_FAILS:
-        if error.lower() in low:
-            return False, error
-    if any(item in low for item in ("timeout", "connection refused", "no route", "unreachable")):
-        return None, "connection timed out or unavailable"
-
     expected = user.rsplit("\\", 1)[-1].split("@", 1)[0].casefold()
+    protocol = protocol.casefold()
     other_error = None
     for line in output.splitlines():
         match = re.search(r"\[(?P<status>[+-])\]\s+(?P<message>.*)$", line)
         if not match:
             continue
-        message = match.group("message").strip()
+        status, message = match.group("status"), match.group("message").strip()
+
+        # VNC reports the password rather than a username. NFS reports
+        # exported shares instead of a credential authentication result.
+        if protocol == "vnc" and secret:
+            if message == secret or message.startswith(secret + " "):
+                if status == "+":
+                    return True, "auth ok"
+                if re.search(r"\bauthentication failed\b", message[len(secret):], re.I):
+                    return False, "VNC authentication rejected"
+                other_error = message[len(secret):].strip()
+                continue
+
         login = re.match(r"^(?:[^\\:\s]+\\)?([^:\s]*):", message)
-        if login and login.group(1).casefold() == expected:
-            if match.group("status") == "+":
+        if login and login.group(1).casefold() == expected and protocol != "nfs":
+            if status == "+":
                 return True, "guest mapped" if "(Guest)" in message else "auth ok"
-            # Most NetExec failures are DOMAIN\\user:password (ERROR).
-            # The portion after ':' is the echoed password, not an error.
-            failure = re.search(
+
+            # Strip the actual supplied secret before reading diagnostic text.
+            # NetExec echoes the password/hash; its contents are not a reason.
+            trailing = message[login.end():]
+            if secret is not None and trailing.startswith(secret):
+                diagnostic = trailing[len(secret):].strip()
+            else:
+                diagnostic = trailing.strip()
+
+            code_match = re.search(
                 r"(STATUS_[A-Z0-9_]+|RPC_S_[A-Z0-9_]+|KDC_ERR_[A-Z0-9_]+|"
                 r"NT_STATUS_[A-Z0-9_]+|invalidCredentials|LOGIN_FAILED)",
-                message, re.I,
+                diagnostic, re.I,
             )
-            if failure:
-                reason = failure.group(0)
-                if reason in HARD_FAILS or reason.upper() in HARD_FAILS:
-                    return False, reason
-                return None, reason
-            if protocol.casefold() == "winrm":
-                # NetExec explicitly rejected this account's WinRM login.
-                # WinRM may reject either credentials or remote shell access.
+            if code_match:
+                code = code_match.group(0)
+                denial_codes = {
+                    "STATUS_ACCESS_DENIED", "RPC_S_ACCESS_DENIED",
+                    "STATUS_LOGON_TYPE_NOT_GRANTED", "STATUS_ACCOUNT_RESTRICTION",
+                }
+                if code.upper() in {item.upper() for item in HARD_FAILS} | denial_codes or code.casefold() == "invalidcredentials":
+                    return False, code
+                return None, code
+
+            if re.search(r"\bLogin failed for user\b", diagnostic, re.I):
+                return False, "SQL login rejected"
+            if re.search(r"\b(Authentication failed|Login incorrect|The logon attempt failed)\b", diagnostic, re.I):
+                return False, "login rejected by server"
+            if protocol == "ftp" and re.search(r"\bResponse:\s*530\b", diagnostic, re.I):
+                return False, "FTP login rejected (530)"
+            if protocol == "winrm" and re.search(
+                r"(WinRMAuthorizationError|HTTP\s+401\b|access is denied)", diagnostic, re.I,
+            ):
                 return False, "WinRM access rejected (authentication or authorization)"
+
+            # NetExec SSH and WinRM emit bare [-] user:secret for confirmed
+            # failures. Other protocols can emit blank errors for tool faults.
+            bare_rejection = not diagnostic or (
+                secret is None and not re.search(r"[\s()]", diagnostic)
+            )
+            if protocol in {"winrm", "ssh"} and bare_rejection:
+                return False, (
+                    "WinRM access rejected (authentication or authorization)"
+                    if protocol == "winrm" else "SSH authentication rejected"
+                )
             return None, "authentication response rejected without a reliable error code"
-        if match.group("status") == "-":
+
+        if status == "-":
             other_error = message
 
     if other_error:
-        # Share enumeration errors are not login failures; keep their full reason.
         if other_error.lower().startswith("error enumerating shares:"):
             return None, other_error
-        error = re.search(
+        if protocol == "vnc" and re.search(r"\bauthentication failed\b", other_error, re.I):
+            return False, "VNC authentication rejected"
+        code_match = re.search(
             r"(STATUS_[A-Z0-9_]+|RPC_S_[A-Z0-9_]+|KDC_ERR_[A-Z0-9_]+|"
             r"NT_STATUS_[A-Z0-9_]+|invalidCredentials|LOGIN_FAILED)",
             other_error, re.I,
         )
-        if error:
-            code = error.group(0)
-            return (False if code.upper() in HARD_FAILS else None), code
-        return None, "unclassified protocol error"
-    return None, "no verified authentication response"
+        if code_match:
+            return None, code_match.group(0)
+    low = output.lower()
+    if any(item in low for item in ("timeout", "connection refused", "no route", "unreachable")):
+        return None, "connection timed out or unavailable"
+    return None, "unclassified protocol error" if other_error else "no verified authentication response"
 
 
 def smb_capability(output: str) -> tuple[str, str]:
@@ -641,7 +686,8 @@ def verify_credential(
             timeout, debug, env=env, remote_time=remote_time,
         )
         records.append(record)
-        ok, reason = auth_state(record.output, cred.user, target, protocol)
+        ok, reason = auth_state(record.output, cred.user, target, protocol,
+                                secret=cred.ntlm_hash if cred.ntlm_hash else cred.password)
         if protocol == "ldap":
             issue = ldap_problem(record.output)
             if issue and issue[0] == "NO":
@@ -715,7 +761,8 @@ def test_protocol(
             )
 
             all_records.append(login)
-            ok, reason = auth_state(login.output, cred.user, target, protocol)
+            ok, reason = auth_state(login.output, cred.user, target, protocol,
+                                    secret=cred.ntlm_hash if cred.ntlm_hash else cred.password)
             if protocol == "ldap":
                 issue = ldap_problem(login.output)
                 if issue:

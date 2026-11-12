@@ -121,6 +121,94 @@ class EvidenceTests(unittest.TestCase):
         # The new rule must not turn other protocols' ambiguous errors into NO.
         self.assertIsNone(auth_state(output, "newcomp$", "", "wmi")[0])
 
+    def test_rejected_auth_matrix_for_all_supported_protocols(self):
+        """Check per-protocol NetExec formats without treating random [-] as bad creds."""
+        negative = {
+            "smb": r"[-] LAB\alice:secret STATUS_LOGON_FAILURE",
+            "ldap": r"[-] LAB\alice:secret invalidCredentials",
+            "wmi": r"[-] LAB\alice:secret (STATUS_LOGON_FAILURE)",
+            "winrm": r"[-] LAB\alice:secret",
+            "ssh": "[-] alice:secret",
+            "rdp": r"[-] LAB\alice:secret (STATUS_LOGON_FAILURE)",
+            "mssql": r"[-] LAB\alice:secret (Login failed for user 'LAB\alice'.)",
+            "ftp": "[-] alice:secret (Response:530 Login incorrect.)",
+            "vnc": "[-] secret - Authentication failed",
+            "nfs": "[-] Failed to mount an exported share",
+        }
+        for protocol, line in negative.items():
+            with self.subTest(protocol=protocol):
+                stdout = f"{protocol.upper()} host 123 HOST {line}"
+                state, reason = auth_state(
+                    stdout, "alice", "", protocol, secret="secret",
+                )
+                self.assertIs(state, None if protocol == "nfs" else False)
+                self.assertNotIn("secret", reason)
+
+    def test_mssql_sequel_login_rejection_with_empty_password(self):
+        rejected = (
+            r"MSSQL 10.129.69.29 1433 DC [-] sequel.htb\guest: "
+            r"(Login failed for user 'sequel\guest'. Please try again with or without '--local-auth')"
+        )
+        self.assertEqual(
+            auth_state(rejected, "guest", "", "mssql", secret=""),
+            (False, "SQL login rejected"),
+        )
+        local = (
+            r"MSSQL 10.129.69.29 1433 DC [-] DC\guest: "
+            r"(Login failed for user 'guest'. Please try again with or without '--local-auth')"
+        )
+        self.assertFalse(auth_state(local, "guest", "", "mssql", secret="")[0])
+        anonymous = (
+            r"MSSQL 10.129.69.29 1433 DC [-] sequel.htb\: "
+            r"(Login failed for user 'NT AUTHORITY\ANONYMOUS LOGON'.)"
+        )
+        self.assertFalse(auth_state(anonymous, "", "", "mssql", secret="")[0])
+
+    def test_ambiguous_errors_and_secrets_do_not_fake_rejection(self):
+        ambiguous = {
+            "wmi": r"[-] LAB\alice:secret (RPC_S_SEC_PKG_ERROR)",
+            "ssh": "[-] alice:secret Key type rejected by server",
+            "ftp": "[-] alice:secret (Response:421 Service not available)",
+            "mssql": r"[-] LAB\alice:secret",
+            "rdp": r"[-] LAB\alice:secret (CredSSP error)",
+        }
+        for protocol, line in ambiguous.items():
+            with self.subTest(protocol=protocol):
+                self.assertIsNone(auth_state(
+                    f"{protocol.upper()} host 123 HOST {line}",
+                    "alice", "", protocol, secret="secret",
+                )[0])
+        # A secret containing an error name is still just a secret.
+        password = "STATUS_LOGON_FAILURE"
+        accepted = f"SMB host 445 DC [+] LAB\\alice:{password}"
+        self.assertEqual(
+            auth_state(accepted, "alice", "", "smb", secret=password),
+            (True, "auth ok"),
+        )
+        failure = f"SMB host 445 DC [-] LAB\\alice:{password}"
+        self.assertIsNone(auth_state(
+            failure, "alice", "", "smb", secret=password,
+        )[0])
+        self.assertIsNone(auth_state(
+            "SMB host 445 DC [-] Error enumerating shares: STATUS_LOGON_FAILURE",
+            "alice", "", "smb", secret="secret",
+        )[0])
+        self.assertIsNone(auth_state(
+            "MSSQL host 1433 DC [-] LAB\\bob: (Login failed for user 'bob')",
+            "alice", "", "mssql", secret="",
+        )[0])
+
+    def test_vnc_success_and_network_failure(self):
+        self.assertEqual(
+            auth_state("VNC host 5900 SERVER [+] hunter2 (Pwn3d!)",
+                       "guest", "", "vnc", secret="hunter2"),
+            (True, "auth ok"),
+        )
+        self.assertIsNone(auth_state(
+            "VNC host 5900 SERVER [-] hunter2 - Connection timed out",
+            "guest", "", "vnc", secret="hunter2",
+        )[0])
+
     def test_connection_timeouts_are_inconclusive(self):
         self.assertIsNone(auth_state("TIMEOUT", "guest", "", "")[0])
         self.assertIsNone(auth_state("connection refused", "guest", "", "")[0])
@@ -479,6 +567,22 @@ class ScannerTests(unittest.TestCase):
         display = " ".join(str(call) for call in printer.call_args_list)
         self.assertIn("WMI", display)
         self.assertNotIn("RPC(135)", display)
+
+    @patch("nxs.runner.find_nxc", return_value="nxc")
+    @patch("nxs.runner.run_command")
+    def test_mssql_failed_login_is_no_not_unclear(self, run, _nxc):
+        output = (
+            r"MSSQL 10.129.69.29 1433 DC [-] sequel.htb\guest: "
+            r"(Login failed for user 'sequel\guest'. Please try again with or without '--local-auth')"
+        )
+        run.return_value = CommandRecord([], 0, output)
+        result = scan_protocol(
+            "sequel.htb", "mssql", Credential("guest", password=""), retries=1,
+        )
+        self.assertEqual(result.level, "NO")
+        self.assertFalse(result.ok)
+        self.assertEqual(run.call_count, 1)
+        self.assertNotIn("Please try", result.proof)
 
     @patch("nxs.runner.find_nxc", return_value="nxc")
     @patch("nxs.runner.run_command")
