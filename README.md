@@ -190,6 +190,16 @@ turning rejected combinations into multi-line blocks. `--json` retains every
 credential, validation outcome, and available raw record. `--no-auth-gate`
 explicitly bypasses the credential-first check for protocol-specific accounts.
 
+## Verified execution and LDAP evidence
+
+For verified LDAP reads, nxs prints the actual user rows returned by NetExec
+instead of only the user count. WinRM (`whoami`), WMI (`whoami`), and SSH
+(`id`) require both a standalone execution marker and a plausible identity
+result before displaying `EXEC`. By default, the identity command and its
+captured output appear below the capability result. The internal marker is
+hidden from the normal terminal output; use `--verbose` or `--json --raw`
+for additional evidence.
+
 ## Access Levels
 
 | Level | Marker | Meaning |
