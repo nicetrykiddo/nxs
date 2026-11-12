@@ -194,11 +194,11 @@ explicitly bypasses the credential-first check for protocol-specific accounts.
 
 For verified LDAP reads, nxs prints the actual user rows returned by NetExec
 instead of only the user count. WinRM (`whoami`), WMI (`whoami`), and SSH
-(`id`) require both a standalone execution marker and a plausible identity
-result before displaying `EXEC`. By default, the identity command and its
-captured output appear below the capability result. The internal marker is
-hidden from the normal terminal output; use `--verbose` or `--json --raw`
-for additional evidence.
+(`id`) require actual identity output from a dedicated `whoami` or `id` command
+before displaying `EXEC`. There are no random marker commands. The identity
+command and its captured result appear below the capability summary by default.
+`--verbose` adds useful protocol details without repeating login banners or
+password echoes. Use `--json --raw` to inspect original command evidence.
 
 ## Access Levels
 
