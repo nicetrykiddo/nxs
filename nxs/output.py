@@ -176,6 +176,10 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
         return details
 
     proto = result.protocol.lower()
+    if proto == "cred":
+        # Authentication has already been summarized in CRED AUTH.
+        # Repeating NetExec's OS banner and echoed password is just noise.
+        return details
 
     def add(line: str) -> None:
         if line and line not in details:
@@ -303,11 +307,10 @@ def extract_verified_evidence(result: ProtocolResult) -> list[str]:
         for record in result.records:
             if flag not in record.command:
                 continue
-            executed = record.command[record.command.index(flag) + 1]
-            marker = re.search(r"NXS_VERIFY_[0-9a-f]+", executed, re.I)
-            if not marker:
+            command = record.command[record.command.index(flag) + 1]
+            if command != command_label:
                 continue
-            identity = verified_command_identity(record.output, marker.group(0), kind)
+            identity = verified_command_identity(record.output, kind)
             if identity:
                 prompt = "PS>" if protocol == "winrm" else ("$" if protocol == "ssh" else "cmd>")
                 details.extend((f"{prompt} {command_label}", identity))
