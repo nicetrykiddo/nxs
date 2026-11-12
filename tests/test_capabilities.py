@@ -461,14 +461,15 @@ class ScannerTests(unittest.TestCase):
             if "-X" in command:
                 marker = command[command.index("-X") + 1].split(";")[0].split()[-1]
                 return CommandRecord(command, 0,
-                    f"WINRM-SSL 10.129.95.241 5986 PRINTER {marker}")
+                    f"WINRM-SSL 10.129.95.241 5986 PRINTER {marker}\n"
+                    "WINRM-SSL 10.129.95.241 5986 PRINTER return.local\\svc-printer")
             return CommandRecord(command, 0, login)
 
         run.side_effect = response
         result = scan_protocol("10.129.95.241", "winrm",
                                Credential("svc-printer", password="secret"))
         self.assertEqual(result.level, "EXEC")
-        self.assertEqual(result.proof, "PowerShell command output verified")
+        self.assertIn("whoami: return.local\\svc-printer", result.proof)
         self.assertEqual(run.call_count, 2)
         self.assertIn("-X", run.call_args_list[1].args[0])
         self.assertIn("; whoami", run.call_args_list[1].args[0][-1])
@@ -513,11 +514,11 @@ class ScannerTests(unittest.TestCase):
         with patch.object(console, "print") as printer:
             print_result_event(result)
         shown = "\n".join(str(c.args[0]) for c in printer.call_args_list)
-        self.assertIn("PS> " + command, shown)
+        self.assertIn("PS> whoami", shown)
         self.assertIn("authority\\svc_ldap", shown)
-        self.assertIn(marker, shown)
+        self.assertNotIn(marker, shown)
         self.assertNotIn("secret", shown)
-        self.assertEqual(printer.call_count, 4)
+        self.assertEqual(printer.call_count, 3)
 
         result.level = "AUTH"
         with patch.object(console, "print") as printer:
@@ -566,6 +567,27 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(quiet.level, "AUTH")
         self.assertIn("skipped", quiet.proof)
         self.assertEqual(run.call_count, 1)
+
+    def test_marker_only_never_confirms_winrm_execution(self):
+        marker = "NXS_VERIFY_deadbeef"
+        output = "WINRM-SSL 10.0.0.1 5986 PRINTER " + marker
+        self.assertEqual(exec_capability(output, marker, identity_kind="windows")[0], "AUTH")
+        output += "\nWINRM-SSL 10.0.0.1 5986 PRINTER nt authority\\system"
+        level, evidence = exec_capability(output, marker, identity_kind="windows")
+        self.assertEqual(level, "EXEC")
+        self.assertIn("nt authority\\system", evidence)
+
+    def test_linux_id_and_windows_whoami_require_actual_identity(self):
+        marker = "NXS_VERIFY_deadbeef"
+        echo = "SSH 10.0.0.1 22 HOST " + marker
+        self.assertEqual(exec_capability(echo, marker, identity_kind="linux")[0], "AUTH")
+        real_id = echo + "\nSSH 10.0.0.1 22 HOST uid=1000(labuser) gid=1000(labuser) groups=1000(labuser)"
+        level, evidence = exec_capability(real_id, marker, identity_kind="linux")
+        self.assertEqual(level, "EXEC")
+        self.assertIn("uid=1000(labuser)", evidence)
+        # Login messages and echoed commands are not whoami results.
+        echoed = echo + "\nWINRM host [+] DOMAIN\\user:Password123"
+        self.assertEqual(exec_capability(echoed, marker, identity_kind="windows")[0], "AUTH")
 
     def test_ssl_prefixed_execution_marker(self):
         marker = "NXS_VERIFY_ABC123"
