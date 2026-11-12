@@ -482,12 +482,46 @@ def ldap_capability(output: str) -> tuple[str, str]:
     return "AUTH", "bind reported; directory read unverified"
 
 
-def exec_capability(output: str, marker: str) -> tuple[str, str]:
-    """A command is verified only when NXC returns the exact marker as output."""
+def verified_command_identity(output: str, marker: str, kind: str) -> str | None:
+    """Find a real whoami/id output row AFTER an exact standalone marker."""
     from .parsers import clean_nxc_line
 
-    if any(clean_nxc_line(line) == marker for line in output.splitlines()):
+    lines = [clean_nxc_line(line).rstrip("\x00") for line in output.splitlines()]
+    try:
+        start = lines.index(marker)
+    except ValueError:
+        return None
+
+    for line in lines[start + 1:]:
+        if not line or line.startswith(("[*]", "[+]", "[-]", "[!]")):
+            continue
+        if kind == "windows":
+            # Windows whoami returns DOMAIN\user, including e.g. NT AUTHORITY\SYSTEM.
+            if re.fullmatch(r"[^\\\r\n:]+\\[^\\\r\n:\s]+", line):
+                return line
+        elif kind == "linux":
+            # id emits numeric uid/gid and named identities; plain echoed strings fail.
+            if re.fullmatch(r"uid=\d+\([^)]+\)\s+gid=\d+\([^)]+\)(?:\s+groups=.*)?", line):
+                return line
+    return None
+
+
+def exec_capability(
+    output: str, marker: str, *, identity_kind: str | None = None
+) -> tuple[str, str]:
+    """Require both a verified marker and whoami/id when identity_kind is given."""
+    from .parsers import clean_nxc_line
+
+    marker_seen = any(clean_nxc_line(line) == marker for line in output.splitlines())
+    if marker_seen:
+        if identity_kind:
+            identity = verified_command_identity(output, marker, identity_kind)
+            if identity:
+                command = "whoami" if identity_kind == "windows" else "id"
+                return "EXEC", f"{command}: {identity}"
+            return "AUTH", "command marker returned but whoami/id output not verified"
         return "EXEC", "command execution verified"
+
     low = output.lower()
     if any(item.lower() in low for item in EXEC_DENIED):
         return "AUTH", "exec denied"
@@ -495,6 +529,7 @@ def exec_capability(output: str, marker: str) -> tuple[str, str]:
         if "[-]" in line:
             return "AUTH", "exec failed: " + line.split("[-]", 1)[1].strip()[:100]
     return "AUTH", "exec unverified (no command output)"
+
 
 
 def ldap_problem(output: str) -> tuple[str, str] | None:
@@ -786,8 +821,10 @@ def test_protocol(
                         timeout, debug, env=ccache_env, remote_time=remote_time,
                     )
                     all_records.append(executed)
-                    level, exec_proof = exec_capability(executed.output, marker)
-                    proof = ("PowerShell command output verified" if level == "EXEC"
+                    level, exec_proof = exec_capability(
+                        executed.output, marker, identity_kind="windows",
+                    )
+                    proof = (f"PowerShell execution verified; {exec_proof}" if level == "EXEC"
                              else "WinRM authenticated; " + exec_proof)
 
             elif protocol in {"ssh", "wmi"}:
@@ -801,7 +838,10 @@ def test_protocol(
                     timeout, debug, env=ccache_env, remote_time=remote_time,
                 )
                 all_records.append(exec_check)
-                level, proof = exec_capability(exec_check.output, marker)
+                level, proof = exec_capability(
+                    exec_check.output, marker,
+                    identity_kind="linux" if protocol == "ssh" else "windows",
+                )
 
             if reason == "guest mapped":
                 proof += "; effective session: Guest"
