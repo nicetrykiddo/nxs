@@ -143,9 +143,32 @@ class EvidenceTests(unittest.TestCase):
             self.assertEqual(reason, err)
             self.assertIs(ok, None if err.startswith("RPC_") else False)
 
-    def test_no_creds_tries_anonymous_and_guest(self):
+    def test_no_creds_uses_guest_only(self):
         creds = resolve_credentials(None, None, None, None, None)
-        self.assertEqual([(c.user, c.password) for c in creds], [("", ""), ("guest", "")])
+        self.assertEqual([(c.user, c.password) for c in creds], [("guest", "")])
+        self.assertEqual(cred_label(creds[0]), "guest")
+        self.assertEqual(cred_label(Credential("", password="")), "null session")
+
+    def test_guest_default_and_explicit_null_session_are_distinct(self):
+        with patch("nxs.cli.resolve_targets", return_value=["host"]), \
+             patch("nxs.cli._probe_targets", return_value={"host": ["smb"]}), \
+             patch("nxs.cli.run_check", return_value=[
+                 ProtocolResult("smb", False, "NO", "STATUS_LOGON_FAILURE")
+             ]) as scan, \\
+             patch("nxs.cli.verify_credential") as gate:
+            guest = CliRunner().invoke(app, ["host", "--json"])
+            self.assertEqual(guest.exit_code, 0, guest.output)
+            import json
+            self.assertEqual(json.loads(guest.output)["user"], "guest")
+            self.assertEqual(scan.call_args.args[1].user, "guest")
+            self.assertEqual(scan.call_args.args[1].password, "")
+            gate.assert_not_called()
+            scan.reset_mock()
+            null = CliRunner().invoke(app, ["host", "--null-session", "--json"])
+            self.assertEqual(null.exit_code, 0, null.output)
+            self.assertEqual(json.loads(null.output)["user"], "")
+            self.assertEqual(scan.call_args.args[1].user, "")
+            gate.assert_not_called()
 
     def test_discovery_summary_does_not_call_guest_access_anonymous(self):
         null = ProtocolResult("smb", True, "AUTH", "share enumeration failed: STATUS_ACCESS_DENIED")
