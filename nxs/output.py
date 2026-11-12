@@ -265,9 +265,10 @@ def print_results(
     verbose: bool = False,
 ) -> None:
     if quiet:
+        identity = cred_label(user) if isinstance(user, Credential) else user
         for result in results:
             if result.level not in {"NO", "UNCLEAR"}:
-                print(f"{result.protocol.upper()} {result.level} {result.proof}")
+                print(f"{target} {identity} {result.protocol.upper()} {result.level} {result.proof}")
         return
 
     console.print(f"\n  [bold]{escape(target)}[/bold]  {escape(cred_label(user) if isinstance(user, Credential) else user)}\n", highlight=False)
