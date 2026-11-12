@@ -325,7 +325,7 @@ class ScannerTests(unittest.TestCase):
                 self.assertIn("verified: 1", shown)
                 self.assertIn("rejected: 1", shown)
                 self.assertIn("inconclusive: 1", shown)
-                self.assertIn("STATUS_LOGON_FAILURE", shown)
+                self.assertCountEqual([call.args[2].level for call in lines.call_args_list], ["NO", "UNCLEAR", "AUTH"])
 
     def test_combo_verbose_prints_failure_diagnostics(self):
         with tempfile.TemporaryDirectory() as directory:
