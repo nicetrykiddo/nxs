@@ -453,6 +453,8 @@ def auth_state(output: str, user: str, target: str, protocol: str) -> tuple[bool
         if error:
             code = error.group(0)
             return (False if code.upper() in HARD_FAILS else None), code
+        if other_error.lower().startswith("error enumerating shares:"):
+            return None, other_error
         return None, "unclassified protocol error"
     return None, "no verified authentication response"
 
