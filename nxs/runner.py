@@ -437,9 +437,9 @@ def auth_state(output: str, user: str, target: str, protocol: str) -> tuple[bool
             )
             if failure:
                 reason = failure.group(0)
-                if reason.upper().startswith("RPC_S_"):
-                    return None, reason
-                return False, reason
+                if reason in HARD_FAILS or reason.upper() in HARD_FAILS:
+                    return False, reason
+                return None, reason
             return None, "authentication response rejected without a reliable error code"
         if match.group("status") == "-":
             other_error = message
@@ -452,8 +452,8 @@ def auth_state(output: str, user: str, target: str, protocol: str) -> tuple[bool
         )
         if error:
             code = error.group(0)
-            return (None if code.upper().startswith("RPC_S_") else False), code
-        return None, other_error[:160]
+            return (False if code.upper() in HARD_FAILS else None), code
+        return None, "unclassified protocol error"
     return None, "no verified authentication response"
 
 
