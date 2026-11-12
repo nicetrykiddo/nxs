@@ -12,8 +12,8 @@ from nxs.models import CommandRecord, Credential, ProtocolResult
 from nxs.output import cred_label, extract_verbose_details, print_probe_summary, print_discovery_results, console
 from nxs.parsers import parse_smb_shares, smb_metadata
 from nxs.runner import (
-    auth_state, exec_capability, probe_ports_per_target, redact_command,
-    redact_record, save_records, smb_capability, test_protocol as scan_protocol,
+    auth_state, exec_capability, probe_ports_per_target, record_dict,
+    save_records, smb_capability, test_protocol as scan_protocol, verify_credential,
 )
 
 BANNER = "SMB 10.129.14.147 445 DC01 [*] Windows 10 / Server 2019 Build 17763 x64 (name:DC01) (domain:timelapse.htb) (signing:True) (SMBv1:False) (Null Auth:True)"
@@ -80,9 +80,9 @@ class ShareParserTests(unittest.TestCase):
 
 
 class EvidenceTests(unittest.TestCase):
-    def test_credential_label_does_not_leak_password_or_hash(self):
-        self.assertNotIn("secret", cred_label(Credential("alice", password="secret")))
-        self.assertNotIn("aabbcc", cred_label(Credential("alice", ntlm_hash="aabbcc")))
+    def test_credential_label_shows_exact_password_or_hash(self):
+        self.assertEqual(cred_label(Credential("alice", password="secret")), "alice:secret")
+        self.assertEqual(cred_label(Credential("alice", ntlm_hash="aabbcc")), "alice:aabbcc")
 
     def test_generic_positive_is_not_an_auth_response(self):
         self.assertEqual(auth_state("SMB host 445 X [+] Enumeration completed", "guest", "", "")[0], None)
@@ -119,12 +119,11 @@ class EvidenceTests(unittest.TestCase):
         response = f"WMI 10.0.0.1 135 DC01 {marker}"
         self.assertEqual(exec_capability(response, marker)[0], "EXEC")
 
-    def test_raw_evidence_redacts_secrets(self):
+    def test_raw_evidence_preserves_exact_secrets(self):
         record = CommandRecord(["nxc", "smb", "host", "-u", "alice", "-p", "secret"], 0,
                                "[+] DOMAIN\\alice:secret")
-        self.assertNotIn("secret", str(redact_record(record)))
-        self.assertNotIn("secret", str(ProtocolResult("smb", True, "AUTH", "ok", records=[record]).public_dict(raw=True)))
-        self.assertNotIn("secret", str(redact_command(record.command)))
+        self.assertIn("secret", str(record_dict(record)))
+        self.assertIn("secret", str(ProtocolResult("smb", True, "AUTH", "ok", records=[record]).public_dict(raw=True)))
         with tempfile.TemporaryDirectory() as tmp:
             result = ProtocolResult("smb", True, "AUTH", "ok", records=[record])
             save_records(Path(tmp), "host", "alice", result)
@@ -132,8 +131,17 @@ class EvidenceTests(unittest.TestCase):
             files = list(Path(tmp).rglob("*.txt"))
             self.assertEqual(len(files), 2)
             for f in files:
-                self.assertNotIn("secret", f.read_text())
+                self.assertIn("secret", f.read_text())
                 self.assertEqual(f.stat().st_mode & 0o777, 0o600)
+
+    def test_failed_login_reason_is_not_echoed_password(self):
+        for proto, err in [("WMI", "RPC_S_SEC_PKG_ERROR"),
+                           ("SMB", "STATUS_LOGON_FAILURE")]:
+            output = f"{proto} host 445 DC01 [-] LAB\\alice:Welcome1 ({err})"
+            ok, reason = auth_state(output, "alice", "", "")
+            self.assertNotIn("Welcome1", reason)
+            self.assertEqual(reason, err)
+            self.assertIs(ok, None if err.startswith("RPC_") else False)
 
     def test_no_creds_tries_anonymous_and_guest(self):
         creds = resolve_credentials(None, None, None, None, None)
@@ -229,6 +237,51 @@ class ScannerTests(unittest.TestCase):
         result = scan_protocol("dc01", "ldap", Credential("alice", password="test"))
         self.assertEqual(result.level, "AUTH")
         self.assertTrue(result.ok)
+
+    @patch("nxs.runner.find_nxc", return_value="nxc")
+    @patch("nxs.runner.run_command")
+    def test_gate_stops_invalid_ldap_credential(self, run, _nxc):
+        run.return_value = CommandRecord([], 0,
+            "LDAP host 389 DC01 [-] LAB\\alice:badpass STATUS_LOGON_FAILURE")
+        result = verify_credential("host", Credential("alice", password="badpass"), ["ldap", "smb"])
+        self.assertFalse(result.ok)
+        self.assertEqual(result.level, "NO")
+        self.assertEqual(run.call_count, 1)
+        self.assertNotIn("badpass", result.proof)
+
+    @patch("nxs.runner.find_nxc", return_value="nxc")
+    @patch("nxs.runner.run_command")
+    def test_gate_accepts_ldap_and_checks_no_second_protocol(self, run, _nxc):
+        run.return_value = CommandRecord([], 0,
+            "LDAP host 389 DC01 [+] LAB\\alice:goodpass")
+        result = verify_credential("host", Credential("alice", password="goodpass"), ["ldap", "smb"])
+        self.assertTrue(result.ok)
+        self.assertEqual(run.call_count, 1)
+        self.assertIn("LDAP", result.proof)
+
+    @patch("nxs.runner.find_nxc", return_value="nxc")
+    @patch("nxs.runner.run_command")
+    def test_gate_rejects_guest_fallback_as_real_auth(self, run, _nxc):
+        run.side_effect = [
+            CommandRecord([], 0, "LDAP host [-] bind required (000004DC)"),
+            CommandRecord([], 0, "SMB host [+] LAB\\alice:guess (Guest)"),
+        ]
+        result = verify_credential("host", Credential("alice", password="guess"), ["ldap", "smb"])
+        self.assertFalse(result.ok)
+        self.assertEqual(result.level, "UNCLEAR")
+        self.assertEqual(run.call_count, 2)
+
+    @patch("nxs.cli.verify_credential")
+    @patch("nxs.cli.run_check")
+    @patch("nxs.cli._probe_targets", return_value={"host": ["ldap", "smb"]})
+    @patch("nxs.cli.resolve_targets", return_value=["host"])
+    def test_cli_skips_capability_scan_after_failed_gate(self, targets, probes, scan, gate):
+        gate.return_value = ProtocolResult("cred", False, "NO", "LDAP: STATUS_LOGON_FAILURE")
+        response = CliRunner().invoke(app, ["host", "-u", "alice", "-p", "badpass", "--json"])
+        self.assertEqual(response.exit_code, 0, response.output)
+        self.assertIn('"password": "badpass"', response.output)
+        self.assertIn('"level": "NO"', response.output)
+        scan.assert_not_called()
 
     def test_no_port_probe_results_do_not_display_all_services(self):
         with patch.object(console, "print") as printer:
