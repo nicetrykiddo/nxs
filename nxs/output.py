@@ -69,11 +69,19 @@ def cred_label(cred: Credential) -> str:
 
 
 def print_scan_header(target: str, cred: Credential, domain: str | None, protocol_count: int) -> None:
-    identity = cred_label(cred)
+    # Style the username and secret separately without changing their exact text.
+    if cred.ccache_file or (not cred.password and not cred.ntlm_hash):
+        identity = f"[bold cyan]{escape(cred_label(cred))}[/bold cyan]"
+    else:
+        secret = cred.ntlm_hash if cred.ntlm_hash is not None else cred.password
+        identity = (
+            f"[bold cyan]{escape(cred.user or '<anonymous>')}[/bold cyan]:"
+            f"[bold green]{escape(secret or '')}[/bold green]"
+        )
     if domain:
-        identity += f"@{domain}"
+        identity += f"[dim]@{escape(domain)}[/dim]"
     console.print(
-        f"\n[bold]{escape(target)}[/bold] · {escape(identity)}"
+        f"\n[bold]{escape(target)}[/bold] · {identity}"
         f" · [dim]{protocol_count} protocols[/dim]\n",
         highlight=False,
     )
@@ -264,6 +272,49 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
     return details
 
 
+
+def extract_verified_evidence(result: ProtocolResult) -> list[str]:
+    """Display source-backed output for LDAP user rows and WinRM execution."""
+    details: list[str] = []
+    protocol = result.protocol.lower()
+
+    if protocol == "ldap" and result.level == "READ":
+        for record in result.records:
+            if "--users" not in record.command:
+                continue
+            table_started = False
+            for raw in record.output.splitlines():
+                line = clean_nxc_line(raw).rstrip("\x00")
+                if re.search(r"\bEnumerated\s+\d+\s+(?:domain\s+)?users\b", line, re.I):
+                    table_started = True
+                    continue
+                if table_started and line:
+                    # NetExec highlights LDAP rows without a bracketed status tag.
+                    if line.startswith(("[*]", "[+]", "[-]", "[!]")):
+                        continue
+                    details.append(line)
+        if not details:
+            details.append("LDAP reported user enumeration, but no user rows were captured")
+
+    if protocol == "winrm" and result.level == "EXEC":
+        for record in result.records:
+            if "-X" not in record.command:
+                continue
+            command = record.command[record.command.index("-X") + 1]
+            details.append("PS> " + command)
+            returned = []
+            for raw in record.output.splitlines():
+                line = clean_nxc_line(raw).rstrip("\x00")
+                if line and not line.startswith(("[*]", "[+]", "[-]", "[!]")):
+                    returned.append(line)
+            details.extend(returned)
+            if not returned:
+                details.append("No PowerShell stdout lines captured")
+            break
+
+    return details
+
+
 def print_result_event(result: ProtocolResult, verbose: bool = False) -> None:
     style = LEVEL_STYLE.get(result.level, "white")
     mark = LEVEL_MARK.get(result.level, "[*]")
@@ -284,10 +335,16 @@ def print_result_event(result: ProtocolResult, verbose: bool = False) -> None:
                 console.print(f"      [dim]↳ {escape(summary)}[/dim]", highlight=False)
                 break
 
+    # Proof must be visible by default, not hidden behind --verbose.
+    evidence = extract_verified_evidence(result)
+    for line in evidence:
+        console.print(f"      [dim]↳ {escape(line)}[/dim]", highlight=False)
+
     if verbose:
-        details = extract_verbose_details(result)
-        for detail in details:
-            console.print(f"      [dim]↳ {escape(detail)}[/dim]", highlight=False)
+        already_shown = set(evidence)
+        for detail in extract_verbose_details(result):
+            if detail not in already_shown:
+                console.print(f"      [dim]↳ {escape(detail)}[/dim]", highlight=False)
 
 
 def print_results(
