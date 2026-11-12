@@ -26,7 +26,7 @@ from .output import (
     print_scan_header,
 )
 from .profiles import ANCHOR_PRIORITY, SUPPORTED_PROTOCOLS
-from .runner import PortProbeError, configure_pacing, get_remote_time, kill_all_procs, probe_ports_per_target, resolve_targets, save_records, target_uses_ipv6, test_protocol
+from .runner import PortProbeError, configure_pacing, get_remote_time, kill_all_procs, probe_ports_per_target, resolve_targets, save_records, target_uses_ipv6, test_protocol, verify_credential
 from .ticket import discover_tickets
 
 class NxsTyper(typer.Typer):
@@ -296,6 +296,7 @@ def main(
     ticket: Optional[str] = typer.Option(None, "-T", "--ticket", help="Kerberos ccache file or directory of tickets"),
     domain: Optional[str] = typer.Option(None, "-d", "--domain", help="Domain"),
     combo: bool = typer.Option(False, "-C", "--combo", help="Try all user×password combinations"),
+    auth_gate: bool = typer.Option(True, "--auth-gate/--no-auth-gate", help="Verify each credential before capability scans (default: on)"),
     opsec: bool = typer.Option(False, "--opsec", help="Sequential paced auth checks; skips automatic capability probes"),
     list_files: bool = typer.Option(False, "--list-files", help="List root entries of readable SMB shares, no recursion"),
     verify_exec: bool = typer.Option(True, "--verify-exec/--no-verify-exec", help="Verify WinRM command execution (default: on; disabled in --opsec)"),
@@ -431,14 +432,29 @@ def main(
         def _scan_pair(pair):
             t, cr = pair
             protos = port_map.get(t, [])
-            results = run_check(
-                t, cr, protos, timeout, retries, threads,
-                local_auth=local_auth, try_local=try_local,
-                kerberos=kerberos, kdc_host=kdc_host,
-                debug=debug, delay=delay, remote_time=remote_time,
-                ipv6=t in ipv6_targets, opsec=opsec,
-                list_files=list_files, verify_exec=verify_exec, enum_users=enum_users,
+            validation = (
+                verify_credential(
+                    t, cr, protos, timeout,
+                    local_auth=local_auth, try_local=try_local,
+                    kerberos=kerberos, kdc_host=kdc_host,
+                    debug=debug, remote_time=remote_time,
+                    ipv6=t in ipv6_targets,
+                )
+                if auth_gate and not discovery_mode and protos else None
             )
+            if validation is not None and not validation.ok:
+                results = [validation]
+            else:
+                results = run_check(
+                    t, cr, protos, timeout, retries, threads,
+                    local_auth=local_auth, try_local=try_local,
+                    kerberos=kerberos, kdc_host=kdc_host,
+                    debug=debug, delay=delay, remote_time=remote_time,
+                    ipv6=t in ipv6_targets, opsec=opsec,
+                    list_files=list_files, verify_exec=verify_exec, enum_users=enum_users,
+                )
+                if validation is not None:
+                    results.insert(0, validation)
             if stream and not discovery_mode:
                 with _out_lock:
                     print_scan_header(t, cr, domain, len(protos))
@@ -455,7 +471,7 @@ def main(
             )
             progress.start()
             task = progress.add_task(
-                "Checking null session + guest access" if discovery_mode else "Scanning credentials on all protocols",
+                "Checking null session + guest access" if discovery_mode else "Validating credentials, then mapping access",
                 total=len(pairs),
             )
 
@@ -471,13 +487,14 @@ def main(
                         save_records(save, t, cr.user, result)
                 if json_out:
                     all_json_rows.append({
-                        "target": t, "user": cr.user, "domain": cr.domain,
+                        "target": t, "user": cr.user, "password": cr.password,
+                        "ntlm_hash": cr.ntlm_hash, "domain": cr.domain,
                         "results": [item.public_dict(raw=raw) for item in results],
                     })
                 if discovery_mode:
                     discovered.setdefault(t, {})["null" if cr.user == "" else "guest"] = results
                 elif not stream and not json_out:
-                    print_results(t, cr.user, results, quiet=quiet, verbose=verbose)
+                    print_results(t, cr, results, quiet=quiet, verbose=verbose)
         if progress:
             progress.stop()
         if discovery_mode and not json_out:
@@ -490,14 +507,30 @@ def main(
 
         def _scan_single_target(t):
             target_protos = port_map.get(t, selected)
-            results = run_check(
-                t, cred, target_protos, timeout, retries, threads,
-                local_auth=local_auth, try_local=try_local,
-                kerberos=kerberos, kdc_host=kdc_host,
-                debug=debug, delay=delay,
-                remote_time=remote_time,
-                ipv6=t in ipv6_targets, opsec=opsec, list_files=list_files, verify_exec=verify_exec, enum_users=enum_users,
+            validation = (
+                verify_credential(
+                    t, cred, target_protos, timeout,
+                    local_auth=local_auth, try_local=try_local,
+                    kerberos=kerberos, kdc_host=kdc_host,
+                    debug=debug, remote_time=remote_time,
+                    ipv6=t in ipv6_targets,
+                )
+                if auth_gate and not discovery_mode and not null_session and target_protos else None
             )
+            if validation is not None and not validation.ok:
+                results = [validation]
+            else:
+                results = run_check(
+                    t, cred, target_protos, timeout, retries, threads,
+                    local_auth=local_auth, try_local=try_local,
+                    kerberos=kerberos, kdc_host=kdc_host,
+                    debug=debug, delay=delay,
+                    remote_time=remote_time,
+                    ipv6=t in ipv6_targets, opsec=opsec, list_files=list_files,
+                    verify_exec=verify_exec, enum_users=enum_users,
+                )
+                if validation is not None:
+                    results.insert(0, validation)
 
             if stream:
                 with _out_lock:
@@ -543,11 +576,13 @@ def main(
                     all_json_rows.append({
                         "target": t,
                         "user": cred.user,
+                        "password": cred.password,
+                        "ntlm_hash": cred.ntlm_hash,
                         "domain": domain,
                         "results": [r.public_dict(raw=raw) for r in results],
                     })
                 elif not stream:
-                    print_results(t, cred.user, results, quiet=quiet, verbose=verbose)
+                    print_results(t, cred, results, quiet=quiet, verbose=verbose)
 
         if _scan_progress:
             _scan_progress.stop()
