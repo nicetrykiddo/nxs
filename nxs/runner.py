@@ -445,6 +445,9 @@ def auth_state(output: str, user: str, target: str, protocol: str) -> tuple[bool
             other_error = message
 
     if other_error:
+        # Share enumeration errors are not login failures; keep their full reason.
+        if other_error.lower().startswith("error enumerating shares:"):
+            return None, other_error
         error = re.search(
             r"(STATUS_[A-Z0-9_]+|RPC_S_[A-Z0-9_]+|KDC_ERR_[A-Z0-9_]+|"
             r"NT_STATUS_[A-Z0-9_]+|invalidCredentials|LOGIN_FAILED)",
@@ -453,8 +456,6 @@ def auth_state(output: str, user: str, target: str, protocol: str) -> tuple[bool
         if error:
             code = error.group(0)
             return (False if code.upper() in HARD_FAILS else None), code
-        if other_error.lower().startswith("error enumerating shares:"):
-            return None, other_error
         return None, "unclassified protocol error"
     return None, "no verified authentication response"
 
