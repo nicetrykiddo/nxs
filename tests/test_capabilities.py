@@ -108,16 +108,26 @@ class EvidenceTests(unittest.TestCase):
         self.assertIsNone(auth_state("TIMEOUT", "guest", "", "")[0])
         self.assertIsNone(auth_state("connection refused", "guest", "", "")[0])
 
-    def test_exec_marker_beats_earlier_denial(self):
-        result = exec_capability("[-] STATUS_ACCESS_DENIED\nVERIFY_123", "VERIFY_123")
-        self.assertEqual(result[0], "EXEC")
+    def test_execution_requires_identity_stdout(self):
+        self.assertEqual(exec_capability(
+            "WINRM host 5985 AUTHORITY nt authority\\system",
+            identity_kind="windows",
+        ), ("EXEC", "whoami: nt authority\\system"))
+        self.assertEqual(exec_capability(
+            "SSH host 22 SERVER uid=0(root) gid=0(root) groups=0(root)",
+            identity_kind="linux",
+        ), ("EXEC", "id: uid=0(root) gid=0(root) groups=0(root)"))
 
-    def test_exec_marker_must_be_standalone_output(self):
-        marker = "NXS_VERIFY_123"
-        error = f"[-] Could not execute cmd /c echo {marker}"
-        self.assertNotEqual(exec_capability(error, marker)[0], "EXEC")
-        response = f"WMI 10.0.0.1 135 DC01 {marker}"
-        self.assertEqual(exec_capability(response, marker)[0], "EXEC")
+    def test_execution_rejects_echoed_logins_and_banners(self):
+        login = "WMI host 135 AUTHORITY [+] authority.htb\\svc_ldap:secret"
+        self.assertEqual(exec_capability(login, identity_kind="windows")[0], "AUTH")
+        self.assertEqual(exec_capability(
+            "[*] Windows 10 (name:AUTHORITY)", identity_kind="windows"
+        )[0], "AUTH")
+        self.assertEqual(exec_capability(
+            "WMI host 135 AUTHORITY [-] STATUS_ACCESS_DENIED",
+            identity_kind="windows",
+        )[0], "AUTH")
 
     def test_raw_evidence_preserves_exact_secrets(self):
         record = CommandRecord(["nxc", "smb", "host", "-u", "alice", "-p", "secret"], 0,
@@ -459,9 +469,8 @@ class ScannerTests(unittest.TestCase):
         login = "WINRM-SSL 10.129.95.241 5986 PRINTER [+] return.local\\svc-printer:secret (Pwn3d!)"
         def response(command, *args, **kwargs):
             if "-X" in command:
-                marker = command[command.index("-X") + 1].split(";")[0].split()[-1]
+                self.assertEqual(command[command.index("-X") + 1], "whoami")
                 return CommandRecord(command, 0,
-                    f"WINRM-SSL 10.129.95.241 5986 PRINTER {marker}\n"
                     "WINRM-SSL 10.129.95.241 5986 PRINTER return.local\\svc-printer")
             return CommandRecord(command, 0, login)
 
@@ -472,7 +481,6 @@ class ScannerTests(unittest.TestCase):
         self.assertIn("whoami: return.local\\svc-printer", result.proof)
         self.assertEqual(run.call_count, 2)
         self.assertIn("-X", run.call_args_list[1].args[0])
-        self.assertIn("; whoami", run.call_args_list[1].args[0][-1])
 
     def test_ldap_user_rows_are_displayed_by_default(self):
         from nxs.output import print_result_event
@@ -497,18 +505,15 @@ class ScannerTests(unittest.TestCase):
         self.assertNotIn("secret", displayed)
         self.assertEqual(printer.call_count, 6)  # summary plus five real table lines
 
-    def test_winrm_default_shows_real_powershell_command_and_stdout(self):
+    def test_winrm_default_shows_only_whoami_and_actual_output(self):
         from nxs.output import print_result_event
-        marker = "NXS_VERIFY_0123abcd"
-        command = "Write-Output " + marker + "; whoami"
         raw = "\n".join([
             "WINRM-SSL 10.0.0.1 5986 AUTHORITY [+] authority.htb\\svc_ldap:secret (Pwn3d!)",
-            "WINRM-SSL 10.0.0.1 5986 AUTHORITY " + marker,
             "WINRM-SSL 10.0.0.1 5986 AUTHORITY authority\\svc_ldap",
         ])
-        result = ProtocolResult("winrm", True, "EXEC", "PowerShell command output verified",
+        result = ProtocolResult("winrm", True, "EXEC", "whoami: authority\\svc_ldap",
             records=[CommandRecord(
-                ["nxc", "winrm", "host", "-u", "svc_ldap", "-p", "secret", "-X", command],
+                ["nxc", "winrm", "host", "-u", "svc_ldap", "-p", "secret", "-X", "whoami"],
                 0, raw,
             )])
         with patch.object(console, "print") as printer:
@@ -516,7 +521,7 @@ class ScannerTests(unittest.TestCase):
         shown = "\n".join(str(c.args[0]) for c in printer.call_args_list)
         self.assertIn("PS> whoami", shown)
         self.assertIn("authority\\svc_ldap", shown)
-        self.assertNotIn(marker, shown)
+        self.assertNotIn("NXS_VERIFY_", shown)
         self.assertNotIn("secret", shown)
         self.assertEqual(printer.call_count, 3)
 
@@ -524,6 +529,22 @@ class ScannerTests(unittest.TestCase):
         with patch.object(console, "print") as printer:
             print_result_event(result)
         self.assertEqual(printer.call_count, 1)
+
+    def test_cred_verbose_never_repeats_nxc_login_banner(self):
+        from nxs.output import print_result_event
+        cred = ProtocolResult("cred", True, "AUTH", "SMB: login verified",
+            records=[CommandRecord(
+                ["nxc", "smb", "host", "-u", "svc_ldap", "-p", "secret"], 0,
+                "SMB host 445 AUTHORITY [*] Windows 10 / Server 2019\n"
+                "SMB host 445 AUTHORITY [+] authority.htb\\svc_ldap:secret",
+            )])
+        with patch.object(console, "print") as printer:
+            print_result_event(cred, verbose=True)
+        shown = "\n".join(str(c.args[0]) for c in printer.call_args_list)
+        self.assertEqual(printer.call_count, 1)
+        self.assertIn("SMB: login verified", shown)
+        self.assertNotIn("secret", shown)
+        self.assertNotIn("Windows 10", shown)
 
     def test_credential_header_restores_user_and_password_styling(self):
         from nxs.output import print_scan_header
@@ -536,20 +557,18 @@ class ScannerTests(unittest.TestCase):
 
     @patch("nxs.runner.find_nxc", return_value="nxc")
     @patch("nxs.runner.run_command")
-    def test_winrm_does_not_claim_exec_from_pwn3d_or_echoed_marker(self, run, _nxc):
+    def test_winrm_does_not_claim_exec_from_pwn3d_or_echoed_login(self, run, _nxc):
         login = "WINRM-SSL 10.129.95.241 5986 PRINTER [+] return.local\\svc-printer:secret (Pwn3d!)"
         def response(command, *args, **kwargs):
             if "-X" in command:
-                marker = command[command.index("-X") + 1].split()[-1]
                 return CommandRecord(command, 0,
-                    f"WINRM-SSL 10.129.95.241 5986 PRINTER [-] Failed to run Write-Output {marker}")
+                    "WINRM-SSL 10.129.95.241 5986 PRINTER [-] Command failed: whoami")
             return CommandRecord(command, 0, login)
 
         run.side_effect = response
         result = scan_protocol("10.129.95.241", "winrm",
                                Credential("svc-printer", password="secret"))
         self.assertEqual(result.level, "AUTH")
-        self.assertNotIn("likely", result.proof)
         self.assertEqual(run.call_count, 2)
 
     @patch("nxs.runner.find_nxc", return_value="nxc")
@@ -568,26 +587,21 @@ class ScannerTests(unittest.TestCase):
         self.assertIn("skipped", quiet.proof)
         self.assertEqual(run.call_count, 1)
 
-    def test_marker_only_never_confirms_winrm_execution(self):
-        marker = "NXS_VERIFY_deadbeef"
-        output = "WINRM-SSL 10.0.0.1 5986 PRINTER " + marker
-        self.assertEqual(exec_capability(output, marker, identity_kind="windows")[0], "AUTH")
+    def test_winrm_requires_identity_stdout_not_only_auth_status(self):
+        output = "WINRM-SSL 10.0.0.1 5986 PRINTER [+] DOMAIN\\svc:secret (Pwn3d!)"
+        self.assertEqual(exec_capability(output, identity_kind="windows")[0], "AUTH")
         output += "\nWINRM-SSL 10.0.0.1 5986 PRINTER nt authority\\system"
-        level, evidence = exec_capability(output, marker, identity_kind="windows")
+        level, evidence = exec_capability(output, identity_kind="windows")
         self.assertEqual(level, "EXEC")
         self.assertIn("nt authority\\system", evidence)
 
-    def test_linux_id_and_windows_whoami_require_actual_identity(self):
-        marker = "NXS_VERIFY_deadbeef"
-        echo = "SSH 10.0.0.1 22 HOST " + marker
-        self.assertEqual(exec_capability(echo, marker, identity_kind="linux")[0], "AUTH")
-        real_id = echo + "\nSSH 10.0.0.1 22 HOST uid=1000(labuser) gid=1000(labuser) groups=1000(labuser)"
-        level, evidence = exec_capability(real_id, marker, identity_kind="linux")
+    def test_linux_id_requires_actual_identity(self):
+        output = "SSH 10.0.0.1 22 HOST [+] lab\\user:secret"
+        self.assertEqual(exec_capability(output, identity_kind="linux")[0], "AUTH")
+        output += "\nSSH 10.0.0.1 22 HOST uid=1000(labuser) gid=1000(labuser) groups=1000(labuser)"
+        level, evidence = exec_capability(output, identity_kind="linux")
         self.assertEqual(level, "EXEC")
         self.assertIn("uid=1000(labuser)", evidence)
-        # Login messages and echoed commands are not whoami results.
-        echoed = echo + "\nWINRM host [+] DOMAIN\\user:Password123"
-        self.assertEqual(exec_capability(echoed, marker, identity_kind="windows")[0], "AUTH")
 
     @patch("nxs.runner.find_nxc", return_value="nxc")
     @patch("nxs.runner.run_command")
@@ -596,11 +610,9 @@ class ScannerTests(unittest.TestCase):
         def response(command, *args, **kwargs):
             if "-x" not in command:
                 return CommandRecord(command, 0, login)
-            marker = re.search(r"NXS_VERIFY_[0-9a-f]+", command[-1]).group(0)
+            self.assertEqual(command[command.index("-x") + 1], "whoami")
             return CommandRecord(command, 0,
-                f"WMI host 135 DC01 {marker}\n"
-                f"WMI host 135 DC01 authority\\alice")
-        import re
+                "WMI host 135 DC01 authority\\alice")
         run.side_effect = response
         result = scan_protocol("host", "wmi", Credential("alice", password="secret"))
         self.assertEqual(result.level, "EXEC")
@@ -613,20 +625,13 @@ class ScannerTests(unittest.TestCase):
         def response(command, *args, **kwargs):
             if "-x" not in command:
                 return CommandRecord(command, 0, login)
-            marker = re.search(r"NXS_VERIFY_[0-9a-f]+", command[-1]).group(0)
+            self.assertEqual(command[command.index("-x") + 1], "id")
             return CommandRecord(command, 0,
-                f"SSH host 22 SERVER {marker}\n"
                 "SSH host 22 SERVER uid=1000(alice) gid=1000(alice)")
-        import re
         run.side_effect = response
         result = scan_protocol("host", "ssh", Credential("alice", password="secret"))
         self.assertEqual(result.level, "EXEC")
         self.assertIn("id: uid=1000(alice)", result.proof)
-
-    def test_ssl_prefixed_execution_marker(self):
-        marker = "NXS_VERIFY_ABC123"
-        output = f"WINRM-SSL 10.0.0.1 5986 PRINTER {marker}"
-        self.assertEqual(exec_capability(output, marker)[0], "EXEC")
 
     @patch("nxs.runner.shutil.which", return_value=None)
     @patch("nxs.runner.tcp_port_open", side_effect=lambda host, port: port == 445)
