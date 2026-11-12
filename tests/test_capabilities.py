@@ -291,6 +291,43 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(result.level, "GUEST")
         self.assertEqual(run.call_count, 1)
 
+    @patch("nxs.runner.find_nxc", return_value="nxc")
+    @patch("nxs.runner.run_command")
+    def test_single_protocol_guest_exact_nxc_output(self, run, _nxc):
+        run.return_value = CommandRecord([], 0,
+            "SMB 10.129.229.56 445 AUTHORITY [+] authority.htb\\admin:Welcome1 (Guest)")
+        result = verify_credential("authority.htb", Credential("admin", password="Welcome1"),
+                                   ["ldap", "smb", "winrm", "wmi"])
+        self.assertEqual(result.level, "GUEST")
+        self.assertFalse(result.ok)
+        self.assertIn("password not verified", result.proof)
+        self.assertNotIn("Welcome1", result.proof)
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][1], "smb")
+
+    @patch("nxs.runner.find_nxc", return_value="nxc")
+    @patch("nxs.runner.run_command")
+    def test_single_protocol_does_not_fallback_after_error(self, run, _nxc):
+        run.return_value = CommandRecord([], 124, "TIMEOUT")
+        result = verify_credential("authority.htb", Credential("admin", password="guess"),
+                                   ["ldap", "smb"])
+        self.assertEqual(result.level, "ERROR")
+        self.assertFalse(result.ok)
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][1], "smb")
+
+    @patch("nxs.runner.find_nxc", return_value="nxc")
+    @patch("nxs.runner.run_command")
+    def test_single_protocol_ldap_when_smb_closed(self, run, _nxc):
+        run.return_value = CommandRecord([], 0,
+            "LDAP host 389 DC01 [+] LAB\\alice:goodpass")
+        result = verify_credential("host", Credential("alice", password="goodpass"),
+                                   ["ldap", "winrm"])
+        self.assertTrue(result.ok)
+        self.assertIn("LDAP", result.proof)
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][1], "ldap")
+
     @patch("nxs.cli.verify_credential")
     @patch("nxs.cli.run_check")
     @patch("nxs.cli._probe_targets", return_value={"host": ["ldap", "smb"]})
