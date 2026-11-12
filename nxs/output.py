@@ -176,18 +176,17 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
         return details
 
     proto = result.protocol.lower()
+    if proto == "cred":
+        # Authentication has already been summarized in CRED AUTH.
+        # Repeating NetExec's OS banner and echoed password is just noise.
+        return details
 
     def add(line: str) -> None:
         if line and line not in details:
             details.append(line)
 
-    # Authentication and service metadata are useful even when no capability was
-    # confirmed. Display each item once rather than repeating it for every NXC call.
-    for record in result.records:
-        for line in record_dict(record)["output"].splitlines():
-            cleaned = clean_nxc_line(line).rstrip("\x00")
-            if cleaned.startswith(("[*] Windows", "[*] Linux", "[+]")):
-                add(cleaned)
+    # Authentication banners and echoed credentials repeat the summary above.
+    # Keep detailed access evidence, not login chatter.
 
     if proto == "smb":
         for record in result.records:
@@ -303,11 +302,10 @@ def extract_verified_evidence(result: ProtocolResult) -> list[str]:
         for record in result.records:
             if flag not in record.command:
                 continue
-            executed = record.command[record.command.index(flag) + 1]
-            marker = re.search(r"NXS_VERIFY_[0-9a-f]+", executed, re.I)
-            if not marker:
+            command = record.command[record.command.index(flag) + 1]
+            if command != command_label:
                 continue
-            identity = verified_command_identity(record.output, marker.group(0), kind)
+            identity = verified_command_identity(record.output, kind)
             if identity:
                 prompt = "PS>" if protocol == "winrm" else ("$" if protocol == "ssh" else "cmd>")
                 details.extend((f"{prompt} {command_label}", identity))
