@@ -273,3 +273,66 @@ def print_results(
 
     for result in results:
         print_result_event(result, verbose=verbose)
+
+def print_discovery_results(
+    target: str,
+    results_by_identity: dict[str, list[ProtocolResult]],
+    *,
+    quiet: bool = False,
+    verbose: bool = False,
+) -> None:
+    """Summarize empty-credential and guest checks together, without conflating access."""
+    indexed = {
+        identity: {result.protocol: result for result in results}
+        for identity, results in results_by_identity.items()
+    }
+    protocols = list(dict.fromkeys(
+        result.protocol
+        for results in results_by_identity.values()
+        for result in results
+    ))
+    rank = {"NO": 0, "UNCLEAR": 1, "AUTH": 2, "READ": 3,
+            "WRITE": 4, "SHELL": 5, "EXEC": 6, "ADMIN": 7}
+
+    if not quiet:
+        console.print(
+            f"\n[bold]{escape(target)}[/bold] · [dim]null session + guest discovery[/dim]\n",
+            highlight=False,
+        )
+        if not protocols:
+            console.print("  [dim]No reachable protocols[/dim]")
+
+    for protocol in protocols:
+        candidates = [
+            (identity, indexed[identity][protocol])
+            for identity in ("null", "guest")
+            if protocol in indexed.get(identity, {})
+        ]
+        if not candidates:
+            continue
+        # Prefer the null attempt on a tie: it needs fewer privileges.
+        identity, best = max(candidates, key=lambda pair: rank.get(pair[1].level, -1))
+        equivalent = len(candidates) == 2 and all(
+            item.level == best.level and item.proof == best.proof
+            for _, item in candidates
+        )
+        source = "null + guest" if equivalent else identity
+
+        if quiet:
+            if best.level not in {"NO", "UNCLEAR"}:
+                print(f"{target} {protocol.upper()} {best.level} [{source}] {best.proof}")
+            continue
+
+        shown = ProtocolResult(
+            protocol=best.protocol, ok=best.ok, level=best.level,
+            proof=f"{best.proof} · {source}", mode=best.mode, records=best.records,
+        )
+        print_result_event(shown, verbose=verbose)
+        if not equivalent:
+            for other_identity, other in candidates:
+                if other_identity == identity:
+                    continue
+                console.print(
+                    f"      [dim]↳ {other_identity}: {other.level} · {escape(other.proof)}[/dim]",
+                    highlight=False,
+                )

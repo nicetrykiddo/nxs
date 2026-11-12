@@ -16,11 +16,15 @@ Requires [NetExec](https://github.com/Pennyw0rth/NetExec) (`nxc`) in PATH.
 
 ## Usage
 
-Credential-free discovery tries **anonymous** and **guest** independently on each
-reachable protocol. This is a small, fixed access check, **not** a password spray:
+Credential-free discovery tries **empty credentials (null session)** and **guest**
+independently on each reachable protocol. The terminal shows one summary per target,
+identifying whether each capability works with null credentials or guest; it does not
+confuse a guest-readable share with anonymous access. `--json` keeps separate
+per-credential results. This is a small, fixed access check, **not** a password spray:
 
 ```bash
 nxs dc01.example.test
+nxs dc01.example.test --null-session  # Empty username/password only; skip guest
 ```
 
 SMB output shows readable/writable share names without requiring `--verbose`,

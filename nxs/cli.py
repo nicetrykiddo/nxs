@@ -20,6 +20,7 @@ from .output import (
     console,
     print_anchor_result,
     print_probe_summary,
+    print_discovery_results,
     print_result_event,
     print_results,
     print_scan_header,
@@ -299,6 +300,7 @@ def main(
     list_files: bool = typer.Option(False, "--list-files", help="List root entries of readable SMB shares, no recursion"),
     verify_exec: bool = typer.Option(True, "--verify-exec/--no-verify-exec", help="Verify WinRM command execution (default: on; disabled in --opsec)"),
     enum_users: bool = typer.Option(False, "--enum-users", help="Attempt SAMR user enumeration over authenticated SMB (not WMI)"),
+    null_session: bool = typer.Option(False, "--null-session", help="Test only empty username/password (no guest fallback)"),
     protocols: Optional[str] = typer.Option(None, "--protocols", help=f"Comma list ({PROTOCOL_LIST})"),
     local_auth: bool = typer.Option(False, "--local-auth", help="Local auth for SMB/WMI"),
     try_local: bool = typer.Option(False, "--try-local", help="Retry with --local-auth on unclear"),
@@ -328,6 +330,12 @@ def main(
     configure_pacing(delay)
 
     # ── Ticket auth ──
+    if null_session and (user is not None or password is not None or ntlm_hash is not None
+                         or creds_file is not None or ticket is not None or kerberos):
+        raise typer.BadParameter("--null-session cannot be combined with credentials, tickets, or Kerberos")
+    discovery_mode = (not null_session and not ticket and not kerberos
+                      and user is None and password is None
+                      and ntlm_hash is None and creds_file is None)
     if ticket:
         if password is not None or ntlm_hash is not None or creds_file:
             raise typer.BadParameter("-T/--ticket is mutually exclusive with -p, -H, -f")
@@ -345,7 +353,8 @@ def main(
                 ccache_file=info.path,
             ))
     else:
-        creds = resolve_credentials(user, password, ntlm_hash, domain, creds_file, combo=combo)
+        creds = ([Credential(user="", password="", domain=domain)] if null_session
+                 else resolve_credentials(user, password, ntlm_hash, domain, creds_file, combo=combo))
     stream = not json_out and not quiet
     all_json_rows = []
 
@@ -430,7 +439,7 @@ def main(
                 ipv6=t in ipv6_targets, opsec=opsec,
                 list_files=list_files, verify_exec=verify_exec, enum_users=enum_users,
             )
-            if stream:
+            if stream and not discovery_mode:
                 with _out_lock:
                     print_scan_header(t, cr, domain, len(protos))
                     for item in results:
@@ -445,8 +454,12 @@ def main(
                 BarColumn(), TimeElapsedColumn(), console=console,
             )
             progress.start()
-            task = progress.add_task("Scanning credentials on all protocols", total=len(pairs))
+            task = progress.add_task(
+                "Checking null session + guest access" if discovery_mode else "Scanning credentials on all protocols",
+                total=len(pairs),
+            )
 
+        discovered: dict[str, dict[str, list]] = {}
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [executor.submit(_scan_pair, pair) for pair in pairs]
             for future in as_completed(futures):
@@ -461,10 +474,16 @@ def main(
                         "target": t, "user": cr.user, "domain": cr.domain,
                         "results": [item.public_dict(raw=raw) for item in results],
                     })
-                elif not stream:
+                if discovery_mode:
+                    discovered.setdefault(t, {})["null" if cr.user == "" else "guest"] = results
+                elif not stream and not json_out:
                     print_results(t, cr.user, results, quiet=quiet, verbose=verbose)
         if progress:
             progress.stop()
+        if discovery_mode and not json_out:
+            for t in targets:
+                print_discovery_results(t, discovered.get(t, {}), quiet=quiet,
+                                        verbose=verbose or list_files)
 
     else:
         cred = creds[0]
