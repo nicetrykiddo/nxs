@@ -9,7 +9,7 @@ from rich.markup import escape
 from . import __version__
 from .models import Credential, ProtocolResult
 from .parsers import clean_nxc_line, parse_smb_shares, smb_metadata
-from .runner import redact_record
+from .runner import record_dict
 
 console = Console()
 
@@ -54,15 +54,16 @@ LEVEL_MARK = {
 
 
 def cred_label(cred: Credential) -> str:
-    """Never print plaintext passwords or hashes in CLI output."""
+    """Display the exact supplied identity and secret."""
     who = cred.user or "<anonymous>"
     if cred.ccache_file:
-        return f"{who} [ticket]"
-    if cred.ntlm_hash:
-        return f"{who} [NTLM hash]"
-    if cred.password is not None and cred.password:
-        return f"{who} [password]"
+        return f"{who} [{cred.ccache_file}]"
+    if cred.ntlm_hash is not None:
+        return f"{who}:{cred.ntlm_hash}"
+    if cred.password is not None:
+        return f"{who}:{cred.password}"
     return who
+
 
 def print_scan_header(target: str, cred: Credential, domain: str | None, protocol_count: int) -> None:
     identity = cred_label(cred)
@@ -142,7 +143,7 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
     # Authentication and service metadata are useful even when no capability was
     # confirmed. Display each item once rather than repeating it for every NXC call.
     for record in result.records:
-        for line in redact_record(record)["output"].splitlines():
+        for line in record_dict(record)["output"].splitlines():
             cleaned = clean_nxc_line(line).rstrip("\x00")
             if cleaned.startswith(("[*] Windows", "[*] Linux", "[+]")):
                 add(cleaned)
@@ -150,14 +151,14 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
     if proto == "smb":
         for record in result.records:
             if "--shares" in record.command and "Enumerated shares" in record.output:
-                for share in parse_smb_shares(redact_record(record)["output"]):
+                for share in parse_smb_shares(record_dict(record)["output"]):
                     add(f"{share.name:<24} {share.display_permissions:<10} {share.remark}".rstrip())
 
             elif "--dir" in record.command:
                 share = record.command[record.command.index("--share") + 1] if "--share" in record.command else "?"
                 add(f"{share}/ (root only)")
                 found = False
-                for line in redact_record(record)["output"].splitlines():
+                for line in record_dict(record)["output"].splitlines():
                     cleaned = clean_nxc_line(line).rstrip("\x00")
                     # NetExec --dir returns: permissions, size, modified date, name.
                     match = re.match(
@@ -189,7 +190,7 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
 
             elif "--users" in record.command:
                 add("SAMR user enumeration (SMB)")
-                for line in redact_record(record)["output"].splitlines():
+                for line in record_dict(record)["output"].splitlines():
                     cleaned = clean_nxc_line(line).rstrip("\x00")
                     if cleaned and not cleaned.startswith(("[*] Windows", "[+]")):
                         add(cleaned)
@@ -199,7 +200,7 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
             if "--users" not in record.command:
                 continue
             in_user_table = False
-            for line in redact_record(record)["output"].splitlines():
+            for line in record_dict(record)["output"].splitlines():
                 cleaned = clean_nxc_line(line).rstrip("\x00")
                 if re.search(r"\bEnumerated\s+\d+\s+domain users\b", cleaned, re.I):
                     in_user_table = True
@@ -216,14 +217,14 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
         for record in result.records:
             if "-x" not in record.command and "-X" not in record.command:
                 continue
-            for line in redact_record(record)["output"].splitlines():
+            for line in record_dict(record)["output"].splitlines():
                 cleaned = clean_nxc_line(line).rstrip("\x00")
                 if cleaned and not cleaned.startswith(("[*]", "[+]", "[-]")):
                     add(cleaned)
 
     # Never shorten an original NXC error. This applies to NO and UNCLEAR too.
     for record in result.records:
-        for line in redact_record(record)["output"].splitlines():
+        for line in record_dict(record)["output"].splitlines():
             if "[-]" in line:
                 add(clean_nxc_line(line).rstrip("\x00"))
 
