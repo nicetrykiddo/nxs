@@ -9,7 +9,7 @@ from rich.markup import escape
 from . import __version__
 from .models import Credential, ProtocolResult
 from .parsers import clean_nxc_line, parse_smb_shares, smb_metadata
-from .runner import record_dict
+from .runner import record_dict, verified_command_identity
 
 console = Console()
 
@@ -296,21 +296,23 @@ def extract_verified_evidence(result: ProtocolResult) -> list[str]:
         if not details:
             details.append("LDAP reported user enumeration, but no user rows were captured")
 
-    if protocol == "winrm" and result.level == "EXEC":
+    if protocol in {"winrm", "wmi", "ssh"} and result.level == "EXEC":
+        flag = "-X" if protocol == "winrm" else "-x"
+        command_label = "id" if protocol == "ssh" else "whoami"
+        kind = "linux" if protocol == "ssh" else "windows"
         for record in result.records:
-            if "-X" not in record.command:
+            if flag not in record.command:
                 continue
-            command = record.command[record.command.index("-X") + 1]
-            details.append("PS> " + command)
-            returned = []
-            for raw in record.output.splitlines():
-                line = clean_nxc_line(raw).rstrip("\x00")
-                if line and not line.startswith(("[*]", "[+]", "[-]", "[!]")):
-                    returned.append(line)
-            details.extend(returned)
-            if not returned:
-                details.append("No PowerShell stdout lines captured")
+            executed = record.command[record.command.index(flag) + 1]
+            marker = re.search(r"NXS_VERIFY_[0-9a-f]+", executed, re.I)
+            if not marker:
+                continue
+            identity = verified_command_identity(record.output, marker.group(0), kind)
+            if identity:
+                prompt = "PS>" if protocol == "winrm" else ("$" if protocol == "ssh" else "cmd>")
+                details.extend((f"{prompt} {command_label}", identity))
             break
+
 
     return details
 
