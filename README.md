@@ -42,11 +42,14 @@ Authentication, share permissions, and command execution are reported separately
 The `Null Auth` header is information advertised by NetExec and does not prove
 anonymous file access.
 
-Scan output, `--raw` JSON, `--debug` commands, and `--save` evidence redact
-passwords and hashes. Evidence files are private and uniquely named.
+All output is unredacted: the CLI, JSON, debug commands and saved evidence
+show the exact supplied passwords and hashes. Use caution when sharing logs.
+Saved evidence files use private permissions and unique names.
 When Nmap is absent, nxs uses direct TCP checks rather than assuming every port
-is open. Multi-credential scans check every supplied credential on every
-reachable protocol rather than skipping non-SMB-valid credentials.
+is open. With multiple credential pairs, nxs authenticates each pair against
+LDAP/SMB first; failed pairs do not trigger capability scans. Use
+`--no-auth-gate` when credentials are scoped to another protocol or
+authentication cannot be verified through the preferred services.
 
 ```bash
 nxs 10.10.10.10 -u john.doe -p 'Password123' -d domain.local
