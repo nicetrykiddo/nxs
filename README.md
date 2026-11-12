@@ -175,14 +175,14 @@ capabilities for verified logins:
 nxs v0.4.4 domain.test · probe: 4/10 ports open · WMI, LDAP, SMB, WINRM
 
 Credential checks (3 pairs)
-  [-] alice:badpass NO  LDAP: STATUS_LOGON_FAILURE
-  [?] bob:guess UNCLEAR  LDAP: bind required (000004DC); SMB: guest fallback
-  [+] carol:goodpass VALID  verified via LDAP: auth ok
+  [-] alice:badpass FAIL  SMB: STATUS_LOGON_FAILURE
+  [*] bob:guess GUEST  SMB: mapped to Guest, supplied password not verified
+  [+] carol:goodpass VALID  SMB: login verified
 
 domain.test · carol:goodpass · 4 protocols
   [+] LDAP   READ     Enumerated 3 users
 
-Credential pairs: 3 · verified: 1 · rejected: 1 · inconclusive: 1
+Credential pairs: 3 · verified: 1 · failed: 1 · guest: 1 · errors: 0
 ```
 
 `--verbose` expands capability evidence for verified credentials without
