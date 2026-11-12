@@ -185,13 +185,8 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
         if line and line not in details:
             details.append(line)
 
-    # Authentication and service metadata are useful even when no capability was
-    # confirmed. Display each item once rather than repeating it for every NXC call.
-    for record in result.records:
-        for line in record_dict(record)["output"].splitlines():
-            cleaned = clean_nxc_line(line).rstrip("\x00")
-            if cleaned.startswith(("[*] Windows", "[*] Linux", "[+]")):
-                add(cleaned)
+    # Authentication banners and echoed credentials repeat the summary above.
+    # Keep detailed access evidence, not login chatter.
 
     if proto == "smb":
         for record in result.records:
