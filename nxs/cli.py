@@ -428,6 +428,7 @@ def main(
         # can opt out of the authentication gate via --no-auth-gate.
         pairs = [(t, cr) for t in targets for cr in creds]
         workers = 1 if opsec else min(len(pairs), 10)
+        pair_order = {(t, id(cr)): idx for idx, (t, cr) in enumerate(pairs)}
 
         def _scan_pair(pair):
             t, cr = pair
@@ -528,19 +529,20 @@ def main(
             # Default output: show verified credentials and their capabilities,
             # never one block for every failed/unclear combination.
             display_rows = diagnostics if verbose and not quiet else hits
+            display_rows.sort(key=lambda pair: pair_order[(pair[0], id(pair[1]))])
             for t, cr, results in display_rows:
                 if quiet:
                     print_results(t, cr, results, quiet=True)
                     continue
                 print_scan_header(t, cr, domain, len(port_map.get(t, [])))
                 for item in results:
-                    if not verbose and (item.protocol == "cred" or item.level in {"NO", "UNCLEAR"}):
+                    if not verbose and item.level in {"NO", "UNCLEAR"}:
                         continue
                     print_result_event(item, verbose=verbose or (list_files and item.protocol == "smb"))
 
             if not quiet:
                 console.print(
-                    f"\\n[dim]Credential pairs: {len(pairs)} · verified: {verified_count}"
+                    f"\n[dim]Credential pairs: {len(pairs)} · verified: {verified_count}"
                     f" · rejected: {rejected_count} · inconclusive: {unclear_count}[/dim]",
                     highlight=False,
                 )
