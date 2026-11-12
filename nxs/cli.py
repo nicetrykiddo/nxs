@@ -424,8 +424,8 @@ def main(
     target_workers = 1 if opsec else min(len(targets), 10)
 
     if len(creds) > 1:
-        # Every credential is evaluated against every reachable protocol.
-        # SMB-only "anchor" gating incorrectly skipped credentials valid on WinRM/WMI.
+        # Validate each pair before capability mapping. Non-AD-only credentials
+        # can opt out of the authentication gate via --no-auth-gate.
         pairs = [(t, cr) for t in targets for cr in creds]
         workers = 1 if opsec else min(len(pairs), 10)
 
@@ -455,11 +455,9 @@ def main(
                 )
                 if validation is not None:
                     results.insert(0, validation)
-            if stream and not discovery_mode:
-                with _out_lock:
-                    print_scan_header(t, cr, domain, len(protos))
-                    for item in results:
-                        print_result_event(item, verbose=verbose or (list_files and item.protocol == "smb"))
+            # Do not print from worker threads. During a combo scan, collect
+            # results while the progress bar runs and present compact findings
+            # after completion. --verbose is the explicit full transcript.
             return t, cr, results
 
         progress = None
@@ -476,6 +474,10 @@ def main(
             )
 
         discovered: dict[str, dict[str, list]] = {}
+        hits: list[tuple[str, Credential, list]] = []
+        diagnostics: list[tuple[str, Credential, list]] = []
+        verified_count = rejected_count = unclear_count = 0
+
         with ThreadPoolExecutor(max_workers=workers) as executor:
             futures = [executor.submit(_scan_pair, pair) for pair in pairs]
             for future in as_completed(futures):
@@ -493,14 +495,59 @@ def main(
                     })
                 if discovery_mode:
                     discovered.setdefault(t, {})["null" if cr.user == "" else "guest"] = results
-                elif not stream and not json_out:
-                    print_results(t, cr, results, quiet=quiet, verbose=verbose)
+                elif not json_out:
+                    gate = next((item for item in results if item.protocol == "cred"), None)
+                    if gate is not None:
+                        state = ("verified" if gate.ok else
+                                 "rejected" if gate.level == "NO" else "unclear")
+                    elif any(item.ok and item.level not in {"NO", "UNCLEAR"} for item in results):
+                        state = "verified"
+                    elif any(item.level == "UNCLEAR" for item in results) or not results:
+                        state = "unclear"
+                    else:
+                        state = "rejected"
+
+                    if state == "verified":
+                        verified_count += 1
+                        hits.append((t, cr, results))
+                    elif state == "rejected":
+                        rejected_count += 1
+                    else:
+                        unclear_count += 1
+
+                    if verbose and not quiet:
+                        diagnostics.append((t, cr, results))
         if progress:
             progress.stop()
+
         if discovery_mode and not json_out:
             for t in targets:
                 print_discovery_results(t, discovered.get(t, {}), quiet=quiet,
                                         verbose=verbose or list_files)
+        elif not json_out:
+            # Default output: show verified credentials and their capabilities,
+            # never one block for every failed/unclear combination.
+            display_rows = diagnostics if verbose and not quiet else hits
+            for t, cr, results in display_rows:
+                if quiet:
+                    print_results(t, cr, results, quiet=True)
+                    continue
+                print_scan_header(t, cr, domain, len(port_map.get(t, [])))
+                for item in results:
+                    if not verbose and (item.protocol == "cred" or item.level in {"NO", "UNCLEAR"}):
+                        continue
+                    print_result_event(item, verbose=verbose or (list_files and item.protocol == "smb"))
+
+            if not quiet:
+                console.print(
+                    f"\\n[dim]Credential pairs: {len(pairs)} · verified: {verified_count}"
+                    f" · rejected: {rejected_count} · inconclusive: {unclear_count}[/dim]",
+                    highlight=False,
+                )
+                if verified_count == 0:
+                    console.print("  [yellow]No verified credentials found.[/yellow]")
+                if unclear_count and not verbose:
+                    console.print("  [dim]Use --verbose for inconclusive reasons or --json for complete results.[/dim]")
 
     else:
         cred = creds[0]
