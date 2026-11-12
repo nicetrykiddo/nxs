@@ -459,7 +459,7 @@ class ScannerTests(unittest.TestCase):
         login = "WINRM-SSL 10.129.95.241 5986 PRINTER [+] return.local\\svc-printer:secret (Pwn3d!)"
         def response(command, *args, **kwargs):
             if "-X" in command:
-                marker = command[command.index("-X") + 1].split()[-1]
+                marker = command[command.index("-X") + 1].split(";")[0].split()[-1]
                 return CommandRecord(command, 0,
                     f"WINRM-SSL 10.129.95.241 5986 PRINTER {marker}")
             return CommandRecord(command, 0, login)
@@ -471,6 +471,67 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(result.proof, "PowerShell command output verified")
         self.assertEqual(run.call_count, 2)
         self.assertIn("-X", run.call_args_list[1].args[0])
+        self.assertIn("; whoami", run.call_args_list[1].args[0][-1])
+
+    def test_ldap_user_rows_are_displayed_by_default(self):
+        from nxs.output import print_result_event
+        raw = "\n".join([
+            "LDAP 10.0.0.1 389 AUTHORITY [+] authority.htb\\svc_ldap:secret",
+            "LDAP 10.0.0.1 389 AUTHORITY [*] Enumerated 4 domain users: authority.htb",
+            "LDAP 10.0.0.1 389 AUTHORITY -Username-         -Last PW Set-",
+            "LDAP 10.0.0.1 389 AUTHORITY administrator     2021-06-01",
+            "LDAP 10.0.0.1 389 AUTHORITY svc_ldap          2021-06-02",
+            "LDAP 10.0.0.1 389 AUTHORITY svc_pwm           2021-06-03",
+            "LDAP 10.0.0.1 389 AUTHORITY guest             <never>",
+        ])
+        result = ProtocolResult("ldap", True, "READ",
+            "Enumerated 4 domain users: authority.htb",
+            records=[CommandRecord(["nxc", "ldap", "host", "--users"], 0, raw)])
+        with patch.object(console, "print") as printer:
+            print_result_event(result)
+        displayed = "\n".join(str(c.args[0]) for c in printer.call_args_list)
+        for user in ("administrator", "svc_ldap", "svc_pwm", "guest"):
+            self.assertIn(user, displayed)
+        self.assertIn("-Username-", displayed)
+        self.assertNotIn("secret", displayed)
+        self.assertEqual(printer.call_count, 6)  # summary plus five real table lines
+
+    def test_winrm_default_shows_real_powershell_command_and_stdout(self):
+        from nxs.output import print_result_event
+        marker = "NXS_VERIFY_0123abcd"
+        command = "Write-Output " + marker + "; whoami"
+        raw = "\n".join([
+            "WINRM-SSL 10.0.0.1 5986 AUTHORITY [+] authority.htb\\svc_ldap:secret (Pwn3d!)",
+            "WINRM-SSL 10.0.0.1 5986 AUTHORITY " + marker,
+            "WINRM-SSL 10.0.0.1 5986 AUTHORITY authority\\svc_ldap",
+        ])
+        result = ProtocolResult("winrm", True, "EXEC", "PowerShell command output verified",
+            records=[CommandRecord(
+                ["nxc", "winrm", "host", "-u", "svc_ldap", "-p", "secret", "-X", command],
+                0, raw,
+            )])
+        with patch.object(console, "print") as printer:
+            print_result_event(result)
+        shown = "\n".join(str(c.args[0]) for c in printer.call_args_list)
+        self.assertIn("PS> " + command, shown)
+        self.assertIn("authority\\svc_ldap", shown)
+        self.assertIn(marker, shown)
+        self.assertNotIn("secret", shown)
+        self.assertEqual(printer.call_count, 4)
+
+        result.level = "AUTH"
+        with patch.object(console, "print") as printer:
+            print_result_event(result)
+        self.assertEqual(printer.call_count, 1)
+
+    def test_credential_header_restores_user_and_password_styling(self):
+        from nxs.output import print_scan_header
+        with patch.object(console, "print") as printer:
+            print_scan_header("host", Credential("svc_ldap", password="my:password"),
+                              None, 4)
+        shown = printer.call_args.args[0]
+        self.assertIn("[bold cyan]svc_ldap[/bold cyan]", shown)
+        self.assertIn("[bold green]my:password[/bold green]", shown)
 
     @patch("nxs.runner.find_nxc", return_value="nxc")
     @patch("nxs.runner.run_command")
