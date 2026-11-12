@@ -154,7 +154,7 @@ class EvidenceTests(unittest.TestCase):
              patch("nxs.cli._probe_targets", return_value={"host": ["smb"]}), \
              patch("nxs.cli.run_check", return_value=[
                  ProtocolResult("smb", False, "NO", "STATUS_LOGON_FAILURE")
-             ]) as scan, \\
+             ]) as scan, \
              patch("nxs.cli.verify_credential") as gate:
             guest = CliRunner().invoke(app, ["host", "--json"])
             self.assertEqual(guest.exit_code, 0, guest.output)
