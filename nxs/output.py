@@ -259,7 +259,7 @@ def print_result_event(result: ProtocolResult, verbose: bool = False) -> None:
 
 def print_results(
     target: str,
-    user: str,
+    user: str | Credential,
     results: list[ProtocolResult],
     quiet: bool = False,
     verbose: bool = False,
@@ -270,7 +270,7 @@ def print_results(
                 print(f"{result.protocol.upper()} {result.level} {result.proof}")
         return
 
-    console.print(f"\n  [bold]{escape(target)}[/bold]  {escape(user)}\n", highlight=False)
+    console.print(f"\n  [bold]{escape(target)}[/bold]  {escape(cred_label(user) if isinstance(user, Credential) else user)}\n", highlight=False)
 
     for result in results:
         print_result_event(result, verbose=verbose)
