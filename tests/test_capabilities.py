@@ -293,20 +293,30 @@ class ScannerTests(unittest.TestCase):
                 "carol": ProtocolResult("cred", True, "AUTH", "verified via LDAP: auth ok"),
             }
 
+            seen = []
+
             def gate(target, credential, protocols, timeout, **kwargs):
+                seen.append(credential.user)
                 return gates[credential.user]
+
+            def map_access(*args, **kwargs):
+                self.assertCountEqual(seen, ["alice", "bob", "carol"])
+                return [ProtocolResult("ldap", True, "READ", "Enumerated 3 users")]
 
             with patch("nxs.cli.resolve_targets", return_value=["host"]), \
                  patch("nxs.cli._probe_targets", return_value={"host": ["ldap", "smb"]}), \
                  patch("nxs.cli.verify_credential", side_effect=gate) as verify, \
-                 patch("nxs.cli.run_check",
-                       return_value=[ProtocolResult("ldap", True, "READ", "Enumerated 3 users")]) as scans, \
+                 patch("nxs.cli.run_check", side_effect=map_access) as scans, \
+                 patch("nxs.cli.print_credential_check") as lines, \
                  patch("nxs.cli.print_scan_header") as headers, \
                  patch("nxs.cli.print_result_event") as rows, \
                  patch.object(console, "print") as outputs:
                 result = CliRunner().invoke(app, ["host", "-u", str(users), "-p", "correct", "-C"])
                 self.assertEqual(result.exit_code, 0, result.output)
                 self.assertEqual(verify.call_count, 3)
+                self.assertEqual(lines.call_count, 3)
+                self.assertCountEqual([call.args[1].user for call in lines.call_args_list],
+                                      ["alice", "bob", "carol"])
                 self.assertEqual(scans.call_count, 1)
                 self.assertEqual(headers.call_count, 1)
                 self.assertEqual(headers.call_args.args[1].user, "carol")
