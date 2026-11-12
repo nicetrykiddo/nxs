@@ -589,6 +589,40 @@ class ScannerTests(unittest.TestCase):
         echoed = echo + "\nWINRM host [+] DOMAIN\\user:Password123"
         self.assertEqual(exec_capability(echoed, marker, identity_kind="windows")[0], "AUTH")
 
+    @patch("nxs.runner.find_nxc", return_value="nxc")
+    @patch("nxs.runner.run_command")
+    def test_wmi_only_claims_exec_with_whoami_output(self, run, _nxc):
+        login = "WMI host 135 DC01 [+] AUTHORITY\\alice:secret"
+        def response(command, *args, **kwargs):
+            if "-x" not in command:
+                return CommandRecord(command, 0, login)
+            marker = re.search(r"NXS_VERIFY_[0-9a-f]+", command[-1]).group(0)
+            return CommandRecord(command, 0,
+                f"WMI host 135 DC01 {marker}\n"
+                f"WMI host 135 DC01 authority\\alice")
+        import re
+        run.side_effect = response
+        result = scan_protocol("host", "wmi", Credential("alice", password="secret"))
+        self.assertEqual(result.level, "EXEC")
+        self.assertIn("whoami: authority\\alice", result.proof)
+
+    @patch("nxs.runner.find_nxc", return_value="nxc")
+    @patch("nxs.runner.run_command")
+    def test_ssh_only_claims_exec_with_id_output(self, run, _nxc):
+        login = "SSH host 22 SERVER [+] SERVER\\alice:secret"
+        def response(command, *args, **kwargs):
+            if "-x" not in command:
+                return CommandRecord(command, 0, login)
+            marker = re.search(r"NXS_VERIFY_[0-9a-f]+", command[-1]).group(0)
+            return CommandRecord(command, 0,
+                f"SSH host 22 SERVER {marker}\n"
+                "SSH host 22 SERVER uid=1000(alice) gid=1000(alice)")
+        import re
+        run.side_effect = response
+        result = scan_protocol("host", "ssh", Credential("alice", password="secret"))
+        self.assertEqual(result.level, "EXEC")
+        self.assertIn("id: uid=1000(alice)", result.proof)
+
     def test_ssl_prefixed_execution_marker(self):
         marker = "NXS_VERIFY_ABC123"
         output = f"WINRM-SSL 10.0.0.1 5986 PRINTER {marker}"
