@@ -90,10 +90,12 @@ def print_credential_check(
     """One uninterrupted terminal line per credential validation attempt."""
     if result.ok:
         mark, status, color = "[+]", "VALID", "green"
+    elif result.level == "GUEST":
+        mark, status, color = "[*]", "GUEST", "yellow"
     elif result.level == "NO":
-        mark, status, color = "[-]", "NO", "red"
+        mark, status, color = "[-]", "FAIL", "red"
     else:
-        mark, status, color = "[?]", "UNCLEAR", "yellow"
+        mark, status, color = "[!]", "ERROR", "yellow"
 
     identity = cred_label(cred)
     prefix = f"{target} " if show_target else ""
