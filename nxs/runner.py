@@ -581,55 +581,65 @@ def verify_credential(
     remote_time: str | None = None,
     ipv6: bool = False,
 ) -> ProtocolResult:
-    """Quick credential gate: validate first, then run capability probes.
+    """Verify a credential using exactly one reachable auth protocol.
 
-    Prefer LDAP/SMB for domain identities. If neither is reachable, use one
-    reachable protocol as an anchor. An inconclusive first check may fall back
-    to the second AD anchor, but never spray a failed candidate across every
-    service. Use --no-auth-gate for protocol-specific identities.
+    SMB is preferred because NetExec reports guest fallback explicitly.
+    An SMB guest session does NOT validate the supplied username/password.
+    If SMB is unavailable, use LDAP, then a remaining reachable protocol.
+    Never silently treat an auth/tool error as an invalid password.
     """
     nxc = find_nxc()
     env = {**os.environ, "KRB5CCNAME": str(cred.ccache_file)} if cred.ccache_file else None
-    anchors = [p for p in (("smb", "ldap") if local_auth else ("ldap", "smb")) if p in protocols]
-    if not anchors and protocols:
-        anchors = [protocols[0]]
-    records: list[CommandRecord] = []
-    uncertainties: list[str] = []
+    priority = ("smb", "ldap", "winrm", "wmi")
+    protocol = next((p for p in priority if p in protocols), None)
+    if protocol is None:
+        protocol = protocols[0] if protocols else None
+    if protocol is None:
+        return ProtocolResult("cred", False, "ERROR", "no reachable authentication protocol")
 
-    for protocol in anchors:
-        modes = [local_auth]
-        if try_local and not local_auth and protocol == "smb":
-            modes.append(True)
-        for mode in modes:
-            record = run_command(
-                build_cmd(nxc, protocol, target, cred, local_auth=mode,
-                          kerberos=kerberos, kdc_host=kdc_host, ipv6=ipv6),
-                timeout, debug, env=env, remote_time=remote_time,
+    modes = [local_auth]
+    if try_local and not local_auth and protocol == "smb":
+        modes.append(True)  # Explicit opt-in for retrying local authentication.
+    records: list[CommandRecord] = []
+    last_error = ""
+
+    for mode in modes:
+        record = run_command(
+            build_cmd(nxc, protocol, target, cred, local_auth=mode,
+                      kerberos=kerberos, kdc_host=kdc_host, ipv6=ipv6),
+            timeout, debug, env=env, remote_time=remote_time,
+        )
+        records.append(record)
+        ok, reason = auth_state(record.output, cred.user, target, protocol)
+        if protocol == "ldap":
+            issue = ldap_problem(record.output)
+            if issue and issue[0] == "NO":
+                ok, reason = False, issue[1]
+            elif issue and issue[0] == "UNCLEAR":
+                ok, reason = None, issue[1]
+
+        if reason == "guest mapped":
+            # Guest sessions work regardless of the password on guest-mapping hosts.
+            return ProtocolResult(
+                "cred", False, "GUEST",
+                f"{protocol.upper()}: mapped to Guest, supplied password not verified",
+                "local" if mode else "domain", records,
             )
-            records.append(record)
-            ok, reason = auth_state(record.output, cred.user, target, protocol)
-            if protocol == "ldap":
-                issue = ldap_problem(record.output)
-                if issue and issue[0] == "NO":
-                    ok, reason = False, issue[1]
-                elif issue and issue[0] == "UNCLEAR":
-                    ok, reason = None, issue[1]
-            if ok is True and reason != "guest mapped":
-                return ProtocolResult("cred", True, "AUTH",
-                                      f"verified via {protocol.upper()}: {reason}",
-                                      "local" if mode else "domain", records)
-            if reason == "guest mapped":
-                uncertainties.append(f"{protocol.upper()}: guest fallback, credential not verified")
-                continue
-            if ok is False:
-                return ProtocolResult("cred", False, "NO",
-                                      f"{protocol.upper()}: {reason}",
-                                      "local" if mode else "domain", records)
-            uncertainties.append(f"{protocol.upper()}: {reason}")
+        if ok is True:
+            return ProtocolResult(
+                "cred", True, "AUTH", f"{protocol.upper()}: login verified",
+                "local" if mode else "domain", records,
+            )
+        if ok is False:
+            return ProtocolResult(
+                "cred", False, "NO", f"{protocol.upper()}: {reason}",
+                "local" if mode else "domain", records,
+            )
+        last_error = f"{protocol.upper()}: {reason}"
 
     return ProtocolResult(
-        "cred", False, "UNCLEAR",
-        "no verified login; " + ("; ".join(uncertainties) if uncertainties else "no reachable authentication service"),
+        "cred", False, "ERROR",
+        last_error or f"{protocol.upper()}: no verifiable login response",
         "domain", records,
     )
 
