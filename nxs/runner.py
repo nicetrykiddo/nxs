@@ -417,14 +417,14 @@ def auth_state(output: str, user: str, target: str, protocol: str) -> tuple[bool
     if any(item in low for item in ("timeout", "connection refused", "no route", "unreachable")):
         return None, "connection timed out or unavailable"
 
-    expected = user.rsplit("\\\\", 1)[-1].split("@", 1)[0].casefold()
+    expected = user.rsplit("\\", 1)[-1].split("@", 1)[0].casefold()
     other_error = None
     for line in output.splitlines():
         match = re.search(r"\[(?P<status>[+-])\]\s+(?P<message>.*)$", line)
         if not match:
             continue
         message = match.group("message").strip()
-        login = re.match(r"^(?:[^\\\\:\s]+\\\\)?([^:\s]*):", message)
+        login = re.match(r"^(?:[^\\:\s]+\\)?([^:\s]*):", message)
         if login and login.group(1).casefold() == expected:
             if match.group("status") == "+":
                 return True, "guest mapped" if "(Guest)" in message else "auth ok"
