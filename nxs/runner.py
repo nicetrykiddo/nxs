@@ -78,32 +78,12 @@ def find_nxc() -> str:
     return path
 
 
-def redact_command(command: list[str]) -> list[str]:
-    """Keep proof of invoked options without exposing credential material."""
-    sensitive = {"-p", "--password", "-H", "--hash", "--kdcHost"}
-    clean = list(command)
-    for idx, arg in enumerate(clean[:-1]):
-        if arg in sensitive:
-            clean[idx + 1] = "[REDACTED]"
-    return clean
-
-
-def redact_record(record: CommandRecord) -> dict:
-    secrets_in_command = [
-        record.command[i + 1] for i, x in enumerate(record.command[:-1])
-        if x in {"-p", "--password", "-H", "--hash"} and record.command[i + 1]
-    ]
-    output = record.output
-    for secret in secrets_in_command:
-        if len(secret) >= 4:
-            output = output.replace(secret, "[REDACTED]")
-        else:
-            # A one-character password must not destroy every occurrence of that letter.
-            output = re.sub(r"(?<=:)" + re.escape(secret) + r"(?=\s|$|\()", "[REDACTED]", output)
+def record_dict(record: CommandRecord) -> dict:
+    """Preserve original command, exit code and output."""
     return {
-        "command": redact_command(record.command),
+        "command": list(record.command),
         "returncode": record.returncode,
-        "output": output,
+        "output": record.output,
     }
 
 
@@ -124,7 +104,7 @@ def run_command(
     if remote_time and shutil.which("faketime"):
         command = ["faketime", remote_time] + command
     if debug:
-        print("[debug]", " ".join(redact_command(command)))
+        print("[debug]", " ".join(command))
     try:
         proc = subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env)
         with _proc_lock:
@@ -424,10 +404,10 @@ def probe_ports_per_target(
 
 
 def auth_state(output: str, user: str, target: str, protocol: str) -> tuple[bool | None, str]:
-    """Return verified login success, explicit credential failure, or inconclusive."""
+    """Verify a login, never confuse the echoed password with an error reason."""
     if not output.strip():
         if target and protocol and check_port_state(target, protocol) == "port closed":
-            return False, "port closed"
+            return None, "port closed"
         return None, "empty response"
 
     low = output.lower()
@@ -437,22 +417,42 @@ def auth_state(output: str, user: str, target: str, protocol: str) -> tuple[bool
     if any(item in low for item in ("timeout", "connection refused", "no route", "unreachable")):
         return None, "connection timed out or unavailable"
 
-    expected = user.rsplit("\\", 1)[-1].split("@", 1)[0].casefold()
+    expected = user.rsplit("\\\\", 1)[-1].split("@", 1)[0].casefold()
     other_error = None
     for line in output.splitlines():
         match = re.search(r"\[(?P<status>[+-])\]\s+(?P<message>.*)$", line)
         if not match:
             continue
         message = match.group("message").strip()
-        login = re.match(r"^(?:[^\\:\s]+\\)?([^:\s]*):", message)
+        login = re.match(r"^(?:[^\\\\:\s]+\\\\)?([^:\s]*):", message)
         if login and login.group(1).casefold() == expected:
             if match.group("status") == "+":
                 return True, "guest mapped" if "(Guest)" in message else "auth ok"
-            return False, message.split(":", 1)[-1].strip() or "authentication rejected"
+            # Most NetExec failures are DOMAIN\\user:password (ERROR).
+            # The portion after ':' is the echoed password, not an error.
+            failure = re.search(
+                r"(STATUS_[A-Z0-9_]+|RPC_S_[A-Z0-9_]+|KDC_ERR_[A-Z0-9_]+|"
+                r"NT_STATUS_[A-Z0-9_]+|invalidCredentials|LOGIN_FAILED)",
+                message, re.I,
+            )
+            if failure:
+                reason = failure.group(0)
+                if reason.upper().startswith("RPC_S_"):
+                    return None, reason
+                return False, reason
+            return None, "authentication response rejected without a reliable error code"
         if match.group("status") == "-":
             other_error = message
 
     if other_error:
+        error = re.search(
+            r"(STATUS_[A-Z0-9_]+|RPC_S_[A-Z0-9_]+|KDC_ERR_[A-Z0-9_]+|"
+            r"NT_STATUS_[A-Z0-9_]+|invalidCredentials|LOGIN_FAILED)",
+            other_error, re.I,
+        )
+        if error:
+            code = error.group(0)
+            return (None if code.upper().startswith("RPC_S_") else False), code
         return None, other_error[:160]
     return None, "no verified authentication response"
 
@@ -512,7 +512,7 @@ def ldap_problem(output: str) -> tuple[str, str] | None:
 
 
 def save_records(save_dir: Path, target: str, user: str, result: ProtocolResult) -> None:
-    """Save redacted evidence with private permissions and unique names."""
+    """Save original evidence with private permissions and unique names."""
     safe_target = re.sub(r"[^A-Za-z0-9_.-]", "_", target)
     safe_user = re.sub(r"[^A-Za-z0-9_.-]", "_", user) or "anonymous"
     base = save_dir / safe_target / safe_user
@@ -520,7 +520,7 @@ def save_records(save_dir: Path, target: str, user: str, result: ProtocolResult)
     base.chmod(0o700)
 
     for idx, record in enumerate(result.records, start=1):
-        data = redact_record(record)
+        data = record_dict(record)
         path = base / f"{result.protocol}_{secrets.token_hex(6)}_{idx}.txt"
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8", errors="replace") as stream:
@@ -562,6 +562,73 @@ def get_remote_time(target: str) -> str | None:
             pass
 
     return None
+
+
+def verify_credential(
+    target: str,
+    cred: Credential,
+    protocols: list[str],
+    timeout: int = 60,
+    *,
+    local_auth: bool = False,
+    try_local: bool = False,
+    kerberos: bool = False,
+    kdc_host: str | None = None,
+    debug: bool = False,
+    remote_time: str | None = None,
+    ipv6: bool = False,
+) -> ProtocolResult:
+    """Quick credential gate: validate first, then run capability probes.
+
+    Prefer LDAP/SMB for domain identities. If neither is reachable, use one
+    reachable protocol as an anchor. An inconclusive first check may fall back
+    to the second AD anchor, but never spray a failed candidate across every
+    service. Use --no-auth-gate for protocol-specific identities.
+    """
+    nxc = find_nxc()
+    env = {**os.environ, "KRB5CCNAME": str(cred.ccache_file)} if cred.ccache_file else None
+    anchors = [p for p in (("smb", "ldap") if local_auth else ("ldap", "smb")) if p in protocols]
+    if not anchors and protocols:
+        anchors = [protocols[0]]
+    records: list[CommandRecord] = []
+    uncertainties: list[str] = []
+
+    for protocol in anchors:
+        modes = [local_auth]
+        if try_local and not local_auth and protocol == "smb":
+            modes.append(True)
+        for mode in modes:
+            record = run_command(
+                build_cmd(nxc, protocol, target, cred, local_auth=mode,
+                          kerberos=kerberos, kdc_host=kdc_host, ipv6=ipv6),
+                timeout, debug, env=env, remote_time=remote_time,
+            )
+            records.append(record)
+            ok, reason = auth_state(record.output, cred.user, target, protocol)
+            if protocol == "ldap":
+                issue = ldap_problem(record.output)
+                if issue and issue[0] == "NO":
+                    ok, reason = False, issue[1]
+                elif issue and issue[0] == "UNCLEAR":
+                    ok, reason = None, issue[1]
+            if ok is True and reason != "guest mapped":
+                return ProtocolResult("cred", True, "AUTH",
+                                      f"verified via {protocol.upper()}: {reason}",
+                                      "local" if mode else "domain", records)
+            if reason == "guest mapped":
+                uncertainties.append(f"{protocol.upper()}: guest fallback, credential not verified")
+                continue
+            if ok is False:
+                return ProtocolResult("cred", False, "NO",
+                                      f"{protocol.upper()}: {reason}",
+                                      "local" if mode else "domain", records)
+            uncertainties.append(f"{protocol.upper()}: {reason}")
+
+    return ProtocolResult(
+        "cred", False, "UNCLEAR",
+        "no verified login; " + ("; ".join(uncertainties) if uncertainties else "no reachable authentication service"),
+        "domain", records,
+    )
 
 
 def test_protocol(
@@ -621,6 +688,12 @@ def test_protocol(
 
             if ok is not True:
                 continue
+            if reason == "guest mapped" and (cred.password or cred.ntlm_hash):
+                return ProtocolResult(
+                    protocol, False, "UNCLEAR",
+                    "guest fallback; supplied credential not verified",
+                    "local" if mode else "domain", all_records,
+                )
 
             level, proof = "AUTH", "auth ok"
             if protocol == "wmi":
