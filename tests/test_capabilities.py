@@ -162,7 +162,7 @@ class EvidenceTests(unittest.TestCase):
     def test_null_session_rejects_other_credentials(self):
         result = CliRunner().invoke(app, ["127.0.0.1", "--null-session", "-u", "guest"])
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("--null-session", result.output)
+        self.assertIn("cannot be combined", result.output)
 
 
 class ScannerTests(unittest.TestCase):
