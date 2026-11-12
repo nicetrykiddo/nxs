@@ -104,6 +104,23 @@ class EvidenceTests(unittest.TestCase):
         self.assertTrue(auth_state(LOGIN, "guest@timelapse.htb", "", "")[0])
         self.assertTrue(auth_state(LOGIN, "timelapse.htb\\guest", "", "")[0])
 
+    def test_winrm_bare_negative_login_is_rejected(self):
+        output = (
+            "WINRM 10.129.229.56 5985 AUTHORITY [*] Windows Server 2019\n"
+            "WINRM 10.129.229.56 5985 AUTHORITY [-] authority.htb\\newcomp$:pass@!123"
+        )
+        state, reason = auth_state(output, "newcomp$", "authority.htb", "winrm")
+        self.assertIs(state, False)
+        self.assertEqual(reason, "WinRM access rejected (authentication or authorization)")
+        self.assertNotIn("pass@!123", reason)
+        # An unrelated failure line is NOT proof this principal was denied.
+        self.assertIsNone(auth_state(output, "another$", "", "winrm")[0])
+        self.assertIsNone(auth_state(
+            "WINRM host 5985 AUTHORITY [-] Connection failure", "newcomp$", "", "winrm"
+        )[0])
+        # The new rule must not turn other protocols' ambiguous errors into NO.
+        self.assertIsNone(auth_state(output, "newcomp$", "", "wmi")[0])
+
     def test_connection_timeouts_are_inconclusive(self):
         self.assertIsNone(auth_state("TIMEOUT", "guest", "", "")[0])
         self.assertIsNone(auth_state("connection refused", "guest", "", "")[0])
@@ -462,6 +479,20 @@ class ScannerTests(unittest.TestCase):
         display = " ".join(str(call) for call in printer.call_args_list)
         self.assertIn("WMI", display)
         self.assertNotIn("RPC(135)", display)
+
+    @patch("nxs.runner.find_nxc", return_value="nxc")
+    @patch("nxs.runner.run_command")
+    def test_winrm_explicit_negative_is_no_without_retry_or_exec(self, run, _nxc):
+        output = "WINRM 10.129.229.56 5985 AUTHORITY [-] authority.htb\\newcomp$:pass@!123"
+        run.return_value = CommandRecord([], 0, output)
+        result = scan_protocol(
+            "authority.htb", "winrm",
+            Credential("newcomp$", password="pass@!123"), retries=1,
+        )
+        self.assertEqual(result.level, "NO")
+        self.assertFalse(result.ok)
+        self.assertIn("access rejected", result.proof)
+        self.assertEqual(run.call_count, 1)
 
     @patch("nxs.runner.find_nxc", return_value="nxc")
     @patch("nxs.runner.run_command")

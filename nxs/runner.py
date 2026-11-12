@@ -440,6 +440,10 @@ def auth_state(output: str, user: str, target: str, protocol: str) -> tuple[bool
                 if reason in HARD_FAILS or reason.upper() in HARD_FAILS:
                     return False, reason
                 return None, reason
+            if protocol.casefold() == "winrm":
+                # NetExec explicitly rejected this account's WinRM login.
+                # WinRM may reject either credentials or remote shell access.
+                return False, "WinRM access rejected (authentication or authorization)"
             return None, "authentication response rejected without a reliable error code"
         if match.group("status") == "-":
             other_error = message
