@@ -336,6 +336,24 @@ class ScannerTests(unittest.TestCase):
                 rows.assert_not_called()
                 scans.assert_not_called()
 
+    def test_linear_credential_format_keeps_password_and_reason(self):
+        from nxs.output import print_credential_check
+        cred = Credential("alice", password="test-pass")
+        state = ProtocolResult(
+            "cred", False, "UNCLEAR",
+            "no verified login; LDAP: bind required; SMB: guest fallback",
+        )
+        with patch.object(console, "print") as printer:
+            print_credential_check("host", cred, state)
+        self.assertEqual(printer.call_count, 1)
+        line = printer.call_args.args[0]
+        self.assertIn("alice:test-pass", line)
+        self.assertIn("UNCLEAR", line)
+        self.assertIn("LDAP: bind required", line)
+        self.assertIn("SMB: guest fallback", line)
+        self.assertNotIn("no verified login;", line)
+        self.assertNotIn("\\n", line)
+
     def test_quiet_output_keeps_credentials_on_hits(self):
         from nxs.output import print_results
         valid = Credential("alice", password="visible-secret")
