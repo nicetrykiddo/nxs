@@ -5,10 +5,11 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from typer.testing import CliRunner
 
-from nxs.cli import resolve_credentials
+from nxs.cli import app, resolve_credentials
 from nxs.models import CommandRecord, Credential, ProtocolResult
-from nxs.output import cred_label, extract_verbose_details, print_probe_summary, console
+from nxs.output import cred_label, extract_verbose_details, print_probe_summary, print_discovery_results, console
 from nxs.parsers import parse_smb_shares, smb_metadata
 from nxs.runner import (
     auth_state, exec_capability, probe_ports_per_target, redact_command,
@@ -137,6 +138,31 @@ class EvidenceTests(unittest.TestCase):
     def test_no_creds_tries_anonymous_and_guest(self):
         creds = resolve_credentials(None, None, None, None, None)
         self.assertEqual([(c.user, c.password) for c in creds], [("", ""), ("guest", "")])
+
+    def test_discovery_summary_does_not_call_guest_access_anonymous(self):
+        null = ProtocolResult("smb", True, "AUTH", "share enumeration failed: STATUS_ACCESS_DENIED")
+        guest = ProtocolResult("smb", True, "READ", "Development[READ]")
+        with patch.object(console, "print") as printer:
+            print_discovery_results("host", {"null": [null], "guest": [guest]})
+        displayed = "\n".join(str(call) for call in printer.call_args_list)
+        self.assertIn("Development[READ]", displayed)
+        self.assertIn("guest", displayed)
+        self.assertIn("null: AUTH", displayed)
+        self.assertEqual(displayed.count("[blue]SMB"), 1)
+
+    def test_identical_discovery_results_are_collapsed(self):
+        null = ProtocolResult("ldap", False, "UNCLEAR", "bind required (000004DC)")
+        guest = ProtocolResult("ldap", False, "UNCLEAR", "bind required (000004DC)")
+        with patch.object(console, "print") as printer:
+            print_discovery_results("host", {"null": [null], "guest": [guest]})
+        displayed = "\n".join(str(call) for call in printer.call_args_list)
+        self.assertIn("null + guest", displayed)
+        self.assertEqual(displayed.count("[blue]LDAP"), 1)
+
+    def test_null_session_rejects_other_credentials(self):
+        result = CliRunner().invoke(app, ["127.0.0.1", "--null-session", "-u", "guest"])
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("--null-session", result.output)
 
 
 class ScannerTests(unittest.TestCase):
