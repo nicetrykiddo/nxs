@@ -470,7 +470,7 @@ def main(
                 console.print(f"[bold]Credential checks[/bold] [dim]({len(pairs)} pairs)[/dim]")
             validation_results: dict[int, list] = {}
             verified: list[int] = []
-            rejected_count = unclear_count = 0
+            rejected_count = guest_count = error_count = 0
 
             def _validate_pair(index: int):
                 t, cr = pairs[index]
@@ -485,7 +485,7 @@ def main(
                             ipv6=t in ipv6_targets,
                         )
                     else:
-                        gate = ProtocolResult("cred", False, "UNCLEAR", "no reachable protocols")
+                        gate = ProtocolResult("cred", False, "ERROR", "no reachable protocols")
                     return index, gate, [gate]
 
                 # Explicit --no-auth-gate: retain per-protocol checking semantics,
@@ -499,16 +499,25 @@ def main(
                     list_files=list_files, verify_exec=verify_exec, enum_users=enum_users,
                 ) if protos else []
                 accepted = [r for r in checked if r.ok and r.level not in {"NO", "UNCLEAR"}]
-                inconclusive = [r for r in checked if r.level == "UNCLEAR"]
+                inconclusive = [r for r in checked if r.level in {"UNCLEAR", "ERROR"}]
+                guest_mapped = [r for r in checked
+                                if "guest mapped" in r.proof.lower()
+                                or "guest fallback" in r.proof.lower()]
                 if accepted:
                     gate = ProtocolResult(
                         "cred", True, "AUTH",
                         "access reported by " + ", ".join(r.protocol.upper() for r in accepted)
                         + " (--no-auth-gate)",
                     )
+                elif guest_mapped:
+                    gate = ProtocolResult(
+                        "cred", False, "GUEST",
+                        "; ".join(f"{r.protocol.upper()}: mapped to Guest, password not verified"
+                                  for r in guest_mapped),
+                    )
                 elif inconclusive or not checked:
                     gate = ProtocolResult(
-                        "cred", False, "UNCLEAR",
+                        "cred", False, "ERROR",
                         "; ".join(f"{r.protocol.upper()}: {r.proof}" for r in inconclusive)
                         or "no reachable protocols",
                     )
@@ -539,8 +548,10 @@ def main(
                         verified.append(i)
                     elif gate.level == "NO":
                         rejected_count += 1
+                    elif gate.level == "GUEST":
+                        guest_count += 1
                     else:
-                        unclear_count += 1
+                        error_count += 1
 
                     if save:
                         # Keep authentic, unredacted proof without duplicate outputs.
@@ -555,7 +566,7 @@ def main(
                 progress.stop()
 
             # Phase 2: only after all credential checks, map capabilities
-            # for the verified pairs. Invalid and inconclusive pairs stop here.
+            # for the verified pairs. Failed, guest-mapped, and error pairs stop here.
             if verified and auth_gate:
                 if stream:
                     console.print("\n[bold]Verified credential capabilities[/bold]")
@@ -595,7 +606,8 @@ def main(
                 if not quiet:
                     console.print(
                         f"\n[dim]Credential pairs: {len(pairs)} · verified: {len(verified)}"
-                        f" · rejected: {rejected_count} · inconclusive: {unclear_count}[/dim]",
+                        f" · failed: {rejected_count} · guest: {guest_count}"
+                        f" · errors: {error_count}[/dim]",
                         highlight=False,
                     )
                     if not verified:

@@ -45,10 +45,15 @@ All output is unredacted: the CLI, JSON, debug commands and saved evidence
 show the exact supplied passwords and hashes. Use caution when sharing logs.
 Saved evidence files use private permissions and unique names.
 When Nmap is absent, nxs uses direct TCP checks rather than assuming every port
-is open. With multiple credential pairs, nxs authenticates each pair against
-LDAP/SMB first; failed pairs do not trigger capability scans. Use
-`--no-auth-gate` when credentials are scoped to another protocol or
-authentication cannot be verified through the preferred services.
+is open. With multiple credential pairs, nxs validates each pair using **one**
+authentication protocol: SMB when available, otherwise LDAP (or another
+reachable protocol). SMB replies marked `(Guest)` are shown as **GUEST**, not
+valid passwords. Other results are **VALID**, **FAIL** (confirmed rejection), or
+**ERROR** (e.g. connection timeout or unverified response). Only verified
+credentials receive capability scans. This is a fast *protocol-specific* check:
+a failed or guest-mapped SMB login does not prove the password cannot work over
+another service. Use `--protocols ldap` to validate against LDAP instead, or
+`--no-auth-gate` to check all selected protocols.
 
 ```bash
 nxs 10.10.10.10 -u john.doe -p 'Password123' -d domain.local
@@ -170,14 +175,14 @@ capabilities for verified logins:
 nxs v0.4.4 domain.test · probe: 4/10 ports open · WMI, LDAP, SMB, WINRM
 
 Credential checks (3 pairs)
-  [-] alice:badpass NO  LDAP: STATUS_LOGON_FAILURE
-  [?] bob:guess UNCLEAR  LDAP: bind required (000004DC); SMB: guest fallback
-  [+] carol:goodpass VALID  verified via LDAP: auth ok
+  [-] alice:badpass FAIL  SMB: STATUS_LOGON_FAILURE
+  [*] bob:guess GUEST  SMB: mapped to Guest, supplied password not verified
+  [+] carol:goodpass VALID  SMB: login verified
 
 domain.test · carol:goodpass · 4 protocols
   [+] LDAP   READ     Enumerated 3 users
 
-Credential pairs: 3 · verified: 1 · rejected: 1 · inconclusive: 1
+Credential pairs: 3 · verified: 1 · failed: 1 · guest: 1 · errors: 0
 ```
 
 `--verbose` expands capability evidence for verified credentials without
