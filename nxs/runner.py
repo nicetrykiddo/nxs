@@ -782,7 +782,7 @@ def test_protocol(
                 if verify_exec:
                     marker = "NXS_VERIFY_" + secrets.token_hex(8)
                     executed = run_command(
-                        build_cmd(nxc, protocol, target, cred, ["-X", f"Write-Output {marker}"], mode, kerberos, kdc_host, ipv6=ipv6),
+                        build_cmd(nxc, protocol, target, cred, ["-X", f"Write-Output {marker}; whoami"], mode, kerberos, kdc_host, ipv6=ipv6),
                         timeout, debug, env=ccache_env, remote_time=remote_time,
                     )
                     all_records.append(executed)
