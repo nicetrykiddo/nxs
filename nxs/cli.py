@@ -15,10 +15,11 @@ from typing import Optional
 import typer
 
 from . import __version__
-from .models import Credential
+from .models import Credential, ProtocolResult
 from .output import (
     console,
     print_anchor_result,
+    print_credential_check,
     print_probe_summary,
     print_discovery_results,
     print_result_event,
@@ -424,132 +425,190 @@ def main(
     target_workers = 1 if opsec else min(len(targets), 10)
 
     if len(creds) > 1:
-        # Validate each pair before capability mapping. Non-AD-only credentials
-        # can opt out of the authentication gate via --no-auth-gate.
         pairs = [(t, cr) for t in targets for cr in creds]
         workers = 1 if opsec else min(len(pairs), 10)
-        pair_order = {(t, id(cr)): idx for idx, (t, cr) in enumerate(pairs)}
 
-        def _scan_pair(pair):
-            t, cr = pair
-            protos = port_map.get(t, [])
-            validation = (
-                verify_credential(
-                    t, cr, protos, timeout,
-                    local_auth=local_auth, try_local=try_local,
-                    kerberos=kerberos, kdc_host=kdc_host,
-                    debug=debug, remote_time=remote_time,
-                    ipv6=t in ipv6_targets,
-                )
-                if auth_gate and not discovery_mode and protos else None
-            )
-            if validation is not None and not validation.ok:
-                results = [validation]
-            else:
+        if discovery_mode:
+            # Preserve anonymous + guest discovery as a separate capability scan.
+            discovered: dict[str, dict[str, list]] = {}
+            def _discover(index: int):
+                t, cr = pairs[index]
                 results = run_check(
-                    t, cr, protos, timeout, retries, threads,
+                    t, cr, port_map.get(t, []), timeout, retries, threads,
                     local_auth=local_auth, try_local=try_local,
                     kerberos=kerberos, kdc_host=kdc_host,
                     debug=debug, delay=delay, remote_time=remote_time,
                     ipv6=t in ipv6_targets, opsec=opsec,
                     list_files=list_files, verify_exec=verify_exec, enum_users=enum_users,
                 )
-                if validation is not None:
-                    results.insert(0, validation)
-            # Do not print from worker threads. During a combo scan, collect
-            # results while the progress bar runs and present compact findings
-            # after completion. --verbose is the explicit full transcript.
-            return t, cr, results
+                return index, results
 
-        progress = None
-        task = None
-        if stream:
-            progress = Progress(
-                SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-                BarColumn(), TimeElapsedColumn(), console=console,
-            )
-            progress.start()
-            task = progress.add_task(
-                "Checking null session + guest access" if discovery_mode else "Validating credentials, then mapping access",
-                total=len(pairs),
-            )
-
-        discovered: dict[str, dict[str, list]] = {}
-        hits: list[tuple[str, Credential, list]] = []
-        diagnostics: list[tuple[str, Credential, list]] = []
-        verified_count = rejected_count = unclear_count = 0
-
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            futures = [executor.submit(_scan_pair, pair) for pair in pairs]
-            for future in as_completed(futures):
-                t, cr, results = future.result()
-                if progress:
-                    progress.advance(task)
-                if save:
-                    for result in results:
-                        save_records(save, t, cr.user, result)
-                if json_out:
-                    all_json_rows.append({
-                        "target": t, "user": cr.user, "password": cr.password,
-                        "ntlm_hash": cr.ntlm_hash, "domain": cr.domain,
-                        "results": [item.public_dict(raw=raw) for item in results],
-                    })
-                if discovery_mode:
-                    discovered.setdefault(t, {})["null" if cr.user == "" else "guest"] = results
-                elif not json_out:
-                    gate = next((item for item in results if item.protocol == "cred"), None)
-                    if gate is not None:
-                        state = ("verified" if gate.ok else
-                                 "rejected" if gate.level == "NO" else "unclear")
-                    elif any(item.ok and item.level not in {"NO", "UNCLEAR"} for item in results):
-                        state = "verified"
-                    elif any(item.level == "UNCLEAR" for item in results) or not results:
-                        state = "unclear"
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(_discover, i) for i in range(len(pairs))]
+                for future in as_completed(futures):
+                    i, results = future.result()
+                    t, cr = pairs[i]
+                    if save:
+                        for result in results:
+                            save_records(save, t, cr.user, result)
+                    if json_out:
+                        all_json_rows.append({
+                            "target": t, "user": cr.user, "password": cr.password,
+                            "ntlm_hash": cr.ntlm_hash, "domain": cr.domain,
+                            "results": [item.public_dict(raw=raw) for item in results],
+                        })
                     else:
-                        state = "rejected"
+                        discovered.setdefault(t, {})["null" if cr.user == "" else "guest"] = results
+            if not json_out:
+                for t in targets:
+                    print_discovery_results(t, discovered.get(t, {}), quiet=quiet,
+                                            verbose=verbose or list_files)
+        else:
+            # Phase 1: finish verifying every credential before any capability probes.
+            # All outcomes appear immediately as single lines, not large result blocks.
+            if stream:
+                console.print(f"[bold]Credential checks[/bold] [dim]({len(pairs)} pairs)[/dim]")
+            validation_results: dict[int, list] = {}
+            verified: list[int] = []
+            rejected_count = unclear_count = 0
 
-                    if state == "verified":
-                        verified_count += 1
-                        hits.append((t, cr, results))
-                    elif state == "rejected":
+            def _validate_pair(index: int):
+                t, cr = pairs[index]
+                protos = port_map.get(t, [])
+                if auth_gate:
+                    if protos:
+                        gate = verify_credential(
+                            t, cr, protos, timeout,
+                            local_auth=local_auth, try_local=try_local,
+                            kerberos=kerberos, kdc_host=kdc_host,
+                            debug=debug, remote_time=remote_time,
+                            ipv6=t in ipv6_targets,
+                        )
+                    else:
+                        gate = ProtocolResult("cred", False, "UNCLEAR", "no reachable protocols")
+                    return index, gate, [gate]
+
+                # Explicit --no-auth-gate: retain per-protocol checking semantics,
+                # but use the same compact result layout.
+                checked = run_check(
+                    t, cr, protos, timeout, retries, threads,
+                    local_auth=local_auth, try_local=try_local,
+                    kerberos=kerberos, kdc_host=kdc_host,
+                    debug=debug, delay=delay, remote_time=remote_time,
+                    ipv6=t in ipv6_targets, opsec=opsec,
+                    list_files=list_files, verify_exec=verify_exec, enum_users=enum_users,
+                ) if protos else []
+                accepted = [r for r in checked if r.ok and r.level not in {"NO", "UNCLEAR"}]
+                inconclusive = [r for r in checked if r.level == "UNCLEAR"]
+                if accepted:
+                    gate = ProtocolResult(
+                        "cred", True, "AUTH",
+                        "access reported by " + ", ".join(r.protocol.upper() for r in accepted)
+                        + " (--no-auth-gate)",
+                    )
+                elif inconclusive or not checked:
+                    gate = ProtocolResult(
+                        "cred", False, "UNCLEAR",
+                        "; ".join(f"{r.protocol.upper()}: {r.proof}" for r in inconclusive)
+                        or "no reachable protocols",
+                    )
+                else:
+                    gate = ProtocolResult(
+                        "cred", False, "NO",
+                        "; ".join(f"{r.protocol.upper()}: {r.proof}" for r in checked),
+                    )
+                return index, gate, [gate, *checked]
+
+            progress = None
+            task = None
+            if stream:
+                progress = Progress(
+                    SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+                    BarColumn(), TimeElapsedColumn(), console=console,
+                )
+                progress.start()
+                task = progress.add_task("Validating credentials", total=len(pairs))
+
+            with ThreadPoolExecutor(max_workers=workers) as executor:
+                futures = [executor.submit(_validate_pair, i) for i in range(len(pairs))]
+                for future in as_completed(futures):
+                    i, gate, initial = future.result()
+                    t, cr = pairs[i]
+                    validation_results[i] = initial
+                    if gate.ok:
+                        verified.append(i)
+                    elif gate.level == "NO":
                         rejected_count += 1
                     else:
                         unclear_count += 1
 
-                    if verbose and not quiet:
-                        diagnostics.append((t, cr, results))
-        if progress:
-            progress.stop()
+                    if save:
+                        # Keep authentic, unredacted proof without duplicate outputs.
+                        for result in initial:
+                            save_records(save, t, cr.user, result)
+                    if not json_out and not quiet:
+                        print_credential_check(t, cr, gate, show_target=len(targets) > 1)
+                    if progress:
+                        progress.advance(task)
 
-        if discovery_mode and not json_out:
-            for t in targets:
-                print_discovery_results(t, discovered.get(t, {}), quiet=quiet,
-                                        verbose=verbose or list_files)
-        elif not json_out:
-            # Default output: show verified credentials and their capabilities,
-            # never one block for every failed/unclear combination.
-            display_rows = diagnostics if verbose and not quiet else hits
-            display_rows.sort(key=lambda pair: pair_order[(pair[0], id(pair[1]))])
-            for t, cr, results in display_rows:
-                if quiet:
-                    print_results(t, cr, results, quiet=True)
-                    continue
-                print_scan_header(t, cr, domain, len(port_map.get(t, [])))
-                for item in results:
-                    if not verbose and item.level in {"NO", "UNCLEAR"}:
+            if progress:
+                progress.stop()
+
+            # Phase 2: only after all credential checks, map capabilities
+            # for the verified pairs. Invalid and inconclusive pairs stop here.
+            if verified and auth_gate:
+                if stream:
+                    console.print("\n[bold]Verified credential capabilities[/bold]")
+                def _map_verified(index: int):
+                    t, cr = pairs[index]
+                    results = run_check(
+                        t, cr, port_map.get(t, []), timeout, retries, threads,
+                        local_auth=local_auth, try_local=try_local,
+                        kerberos=kerberos, kdc_host=kdc_host,
+                        debug=debug, delay=delay, remote_time=remote_time,
+                        ipv6=t in ipv6_targets, opsec=opsec,
+                        list_files=list_files, verify_exec=verify_exec, enum_users=enum_users,
+                    )
+                    return index, results
+
+                with ThreadPoolExecutor(max_workers=min(len(verified), workers)) as executor:
+                    futures = [executor.submit(_map_verified, i) for i in verified]
+                    for future in as_completed(futures):
+                        i, mapped = future.result()
+                        validation_results[i].extend(mapped)
+                        if save:
+                            t, cr = pairs[i]
+                            for result in mapped:
+                                save_records(save, t, cr.user, result)
+
+            if not json_out:
+                for i in sorted(verified):
+                    t, cr = pairs[i]
+                    results = validation_results[i]
+                    if quiet:
+                        print_results(t, cr, results, quiet=True)
                         continue
-                    print_result_event(item, verbose=verbose or (list_files and item.protocol == "smb"))
+                    print_scan_header(t, cr, domain, len(port_map.get(t, [])))
+                    for item in results[1:]:
+                        print_result_event(item, verbose=verbose or (list_files and item.protocol == "smb"))
 
-            if not quiet:
-                console.print(
-                    f"\n[dim]Credential pairs: {len(pairs)} · verified: {verified_count}"
-                    f" · rejected: {rejected_count} · inconclusive: {unclear_count}[/dim]",
-                    highlight=False,
-                )
-                if verified_count == 0:
-                    console.print("  [yellow]No verified credentials found.[/yellow]")
-                if unclear_count and not verbose:
-                    console.print("  [dim]Use --verbose for inconclusive reasons or --json for complete results.[/dim]")
+                if not quiet:
+                    console.print(
+                        f"\n[dim]Credential pairs: {len(pairs)} · verified: {len(verified)}"
+                        f" · rejected: {rejected_count} · inconclusive: {unclear_count}[/dim]",
+                        highlight=False,
+                    )
+                    if not verified:
+                        console.print("  [yellow]No verified credentials found.[/yellow]")
+
+            if json_out:
+                for i, (t, cr) in enumerate(pairs):
+                    all_json_rows.append({
+                        "target": t, "user": cr.user, "password": cr.password,
+                        "ntlm_hash": cr.ntlm_hash, "domain": cr.domain,
+                        "results": [item.public_dict(raw=raw)
+                                    for item in validation_results[i]],
+                    })
 
     else:
         cred = creds[0]
