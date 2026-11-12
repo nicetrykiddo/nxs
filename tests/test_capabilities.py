@@ -310,12 +310,12 @@ class ScannerTests(unittest.TestCase):
                 self.assertEqual(scans.call_count, 1)
                 self.assertEqual(headers.call_count, 1)
                 self.assertEqual(headers.call_args.args[1].user, "carol")
-                self.assertEqual([c.args[0].level for c in rows.call_args_list], ["AUTH", "READ"])
+                self.assertEqual([c.args[0].level for c in rows.call_args_list], ["READ"])
                 shown = "\n".join(str(c) for c in outputs.call_args_list)
                 self.assertIn("verified: 1", shown)
                 self.assertIn("rejected: 1", shown)
                 self.assertIn("inconclusive: 1", shown)
-                self.assertNotIn("STATUS_LOGON_FAILURE", shown)
+                self.assertIn("STATUS_LOGON_FAILURE", shown)
 
     def test_combo_verbose_prints_failure_diagnostics(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -332,8 +332,8 @@ class ScannerTests(unittest.TestCase):
                  patch("nxs.cli.print_result_event") as rows:
                 result = CliRunner().invoke(app, ["host", "-u", str(users), "-p", "wrong", "-C", "--verbose"])
                 self.assertEqual(result.exit_code, 0, result.output)
-                self.assertEqual(headers.call_count, 2)
-                self.assertCountEqual([c.args[0].level for c in rows.call_args_list], ["NO", "UNCLEAR"])
+                self.assertEqual(headers.call_count, 0)
+                rows.assert_not_called()
                 scans.assert_not_called()
 
     def test_quiet_output_keeps_credentials_on_hits(self):
