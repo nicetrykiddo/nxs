@@ -1,6 +1,10 @@
 name: Publish to PyPI
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/publish.yml'
   release:
     types: [published]
 
