@@ -234,24 +234,6 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
                     if cleaned and not cleaned.startswith(("[*] Windows", "[+]")):
                         add(cleaned)
 
-    elif proto == "ldap":
-        for record in result.records:
-            if "--users" not in record.command:
-                continue
-            in_user_table = False
-            for line in record_dict(record)["output"].splitlines():
-                cleaned = clean_nxc_line(line).rstrip("\x00")
-                if re.search(r"\bEnumerated\s+\d+\s+domain users\b", cleaned, re.I):
-                    in_user_table = True
-                    # The summary is already shown in the main result.
-                    continue
-                if in_user_table:
-                    if cleaned.startswith(("[*]", "[+]", "[-]", "[!]")):
-                        in_user_table = False
-                    elif cleaned:
-                        # Do not truncate LDAP descriptions, columns, or usernames.
-                        add(cleaned)
-
     elif proto in {"ssh", "winrm", "wmi"}:
         for record in result.records:
             if "-x" not in record.command and "-X" not in record.command:
@@ -271,28 +253,67 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
 
 
 
+def ldap_usernames(result: ProtocolResult) -> list[str]:
+    """Extract only usernames from NetExec's verified LDAP --users table."""
+    names: list[str] = []
+    seen: set[str] = set()
+    for record in result.records:
+        if "--users" not in record.command:
+            continue
+        announced = False
+        header_seen = False
+        for raw in record.output.splitlines():
+            line = clean_nxc_line(raw).rstrip("\x00")
+            if re.search(r"\bEnumerated\s+\d+\s+(?:domain\s+)?users\b", line, re.I):
+                announced = True
+                header_seen = False
+                continue
+            if not announced:
+                continue
+            if line.startswith(("[*]", "[+]", "[-]", "[!]")):
+                announced = False
+                header_seen = False
+                continue
+            if not header_seen:
+                if re.match(r"^-Username-\s{2,}", line, re.I):
+                    header_seen = True
+                continue
+            parts = re.split(r"\s{2,}", line.strip(), maxsplit=1)
+            if len(parts) != 2:
+                continue
+            name, metadata = parts
+            # Reject headings and stray text, require a Last PW Set value.
+            if not re.match(r"^(?:\d{4}-\d{2}-\d{2}\b|<never>\b|<never>|never\b)", metadata, re.I):
+                continue
+            if name and name not in seen:
+                seen.add(name)
+                names.append(name)
+    return names
+
+
 def extract_verified_evidence(result: ProtocolResult) -> list[str]:
     """Display source-backed output for LDAP user rows and WinRM execution."""
     details: list[str] = []
     protocol = result.protocol.lower()
 
     if protocol == "ldap" and result.level == "READ":
-        for record in result.records:
-            if "--users" not in record.command:
-                continue
-            table_started = False
-            for raw in record.output.splitlines():
-                line = clean_nxc_line(raw).rstrip("\x00")
-                if re.search(r"\bEnumerated\s+\d+\s+(?:domain\s+)?users\b", line, re.I):
-                    table_started = True
-                    continue
-                if table_started and line:
-                    # NetExec highlights LDAP rows without a bracketed status tag.
-                    if line.startswith(("[*]", "[+]", "[-]", "[!]")):
-                        continue
+        names = ldap_usernames(result)
+        if names:
+            # Keep usernames intact, including names containing spaces.
+            # Bound visible rows to the terminal width, not a fixed user count.
+            width = max(32, console.width - 10)
+            line = ""
+            for name in names:
+                candidate = f"{line}  ·  {name}" if line else name
+                if line and len(candidate) > width:
                     details.append(line)
-        if not details:
-            details.append("LDAP reported user enumeration, but no user rows were captured")
+                    line = name
+                else:
+                    line = candidate
+            if line:
+                details.append(line)
+        else:
+            details.append("LDAP enumeration reported; usernames not captured")
 
     if protocol in {"winrm", "wmi", "ssh"} and result.level == "EXEC":
         flag = "-X" if protocol == "winrm" else "-x"

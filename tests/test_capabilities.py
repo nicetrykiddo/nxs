@@ -624,28 +624,64 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(run.call_count, 2)
         self.assertIn("-X", run.call_args_list[1].args[0])
 
-    def test_ldap_user_rows_are_displayed_by_default(self):
-        from nxs.output import print_result_event
+    def test_ldap_user_rows_are_compact_by_default_and_verbose(self):
+        from nxs.output import print_result_event, ldap_usernames
         raw = "\n".join([
             "LDAP 10.0.0.1 389 AUTHORITY [+] authority.htb\\svc_ldap:secret",
-            "LDAP 10.0.0.1 389 AUTHORITY [*] Enumerated 4 domain users: authority.htb",
-            "LDAP 10.0.0.1 389 AUTHORITY -Username-         -Last PW Set-",
-            "LDAP 10.0.0.1 389 AUTHORITY administrator     2021-06-01",
-            "LDAP 10.0.0.1 389 AUTHORITY svc_ldap          2021-06-02",
-            "LDAP 10.0.0.1 389 AUTHORITY svc_pwm           2021-06-03",
-            "LDAP 10.0.0.1 389 AUTHORITY guest             <never>",
+            "LDAP 10.0.0.1 389 AUTHORITY [*] Enumerated 9 domain users: authority.htb",
+            "LDAP 10.0.0.1 389 AUTHORITY -Username-         -Last PW Set-       -BadPW-  -Description-",
+            *[
+                f"LDAP 10.0.0.1 389 AUTHORITY {user:<30} 2022-11-19 02:43:13 0   Description"
+                for user in (
+                    "Administrator", "Guest", "krbtgt", "Tom.Henn",
+                    "Brandon.Brown", "Ryan.Cooper", "sql_svc",
+                    "James.Roberts", "Nicole.Thompson",
+                )
+            ],
         ])
         result = ProtocolResult("ldap", True, "READ",
-            "Enumerated 4 domain users: authority.htb",
+            "Enumerated 9 domain users: authority.htb",
             records=[CommandRecord(["nxc", "ldap", "host", "--users"], 0, raw)])
-        with patch.object(console, "print") as printer:
-            print_result_event(result)
-        displayed = "\n".join(str(c.args[0]) for c in printer.call_args_list)
-        for user in ("administrator", "svc_ldap", "svc_pwm", "guest"):
-            self.assertIn(user, displayed)
-        self.assertIn("-Username-", displayed)
-        self.assertNotIn("secret", displayed)
-        self.assertEqual(printer.call_count, 6)  # summary plus five real table lines
+        self.assertEqual(len(ldap_usernames(result)), 9)
+        for verbose in (False, True):
+            with self.subTest(verbose=verbose), patch.object(console, "print") as printer:
+                print_result_event(result, verbose=verbose)
+            shown = "\n".join(str(c.args[0]) for c in printer.call_args_list)
+            for user in (
+                "Administrator", "Guest", "krbtgt", "Tom.Henn",
+                "Brandon.Brown", "Ryan.Cooper", "sql_svc",
+                "James.Roberts", "Nicole.Thompson",
+            ):
+                self.assertEqual(shown.count(user), 1)
+            self.assertNotIn("-Username-", shown)
+            self.assertNotIn("-Last PW Set-", shown)
+            self.assertNotIn("2022-11-19", shown)
+            self.assertNotIn("Description", shown)
+            self.assertNotIn("secret", shown)
+            self.assertLessEqual(printer.call_count, 4)
+
+    def test_ldap_compact_parser_preserves_spaced_names_and_fails_closed(self):
+        from nxs.output import ldap_usernames, extract_verified_evidence
+        raw = "\n".join([
+            "LDAP host 389 DC [*] Enumerated 3 domain users: lab.local",
+            "LDAP host 389 DC -Username-          -Last PW Set-",
+            "LDAP host 389 DC john doe           2022-11-19 02:43:13",
+            "LDAP host 389 DC svc_read           <never>",
+            "LDAP host 389 DC svc_read           <never>",
+            "LDAP host 389 DC [*] Completed",
+            "LDAP host 389 DC garbage            2022-11-19 02:43:13",
+        ])
+        r = ProtocolResult("ldap", True, "READ", "Enumerated 3 domain users",
+                           records=[CommandRecord(["nxc", "ldap", "host", "--users"], 0, raw)])
+        self.assertEqual(ldap_usernames(r), ["john doe", "svc_read"])
+        self.assertIn("john doe", " ".join(extract_verified_evidence(r)))
+        bad = ProtocolResult("ldap", True, "READ", "Enumerated 1 domain users",
+                             records=[CommandRecord(["nxc", "ldap", "host", "--users"], 0,
+                               "LDAP host 389 DC [*] Enumerated 1 domain users\n"
+                               "LDAP host 389 DC some random unrelated line")])
+        self.assertEqual(ldap_usernames(bad), [])
+        self.assertEqual(extract_verified_evidence(bad),
+                         ["LDAP enumeration reported; usernames not captured"])
 
     def test_winrm_default_shows_only_whoami_and_actual_output(self):
         from nxs.output import print_result_event
