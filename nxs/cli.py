@@ -65,13 +65,18 @@ def version_callback(value: bool):
         raise typer.Exit()
 
 
-def read_file_or_value(value: str) -> list[str]:
+def read_file_or_value(value: str, *, password_file: bool = False) -> list[str]:
     path = Path(value)
     if path.is_file():
-        lines = [
-            line.strip() for line in path.read_text(encoding="utf-8", errors="ignore").splitlines()
-            if line.strip() and not line.startswith("#")
-        ]
+        raw_lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
+        if password_file:
+            # A password is literal data: '#', whitespace and punctuation are significant.
+            lines = [line for line in raw_lines if line != ""]
+        else:
+            lines = [
+                line.strip() for line in raw_lines
+                if line.strip() and not line.startswith("#")
+            ]
         if not lines:
             raise typer.BadParameter(f"file is empty: {value}")
         return lines
@@ -192,7 +197,7 @@ def resolve_credentials(
         ]
 
     if password is not None:
-        passwords = read_file_or_value(password)
+        passwords = read_file_or_value(password, password_file=True)
         if combo:
             return [
                 Credential(user=u, password=p, domain=domain)
