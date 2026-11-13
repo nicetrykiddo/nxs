@@ -537,19 +537,26 @@ class ScannerTests(unittest.TestCase):
         self.assertNotIn("no verified login;", line)
         self.assertNotIn("\\n", line)
 
-    def test_quiet_output_keeps_credentials_on_hits(self):
+    def test_quiet_output_keeps_real_protocol_hits_only(self):
         from nxs.output import print_results
         valid = Credential("alice", password="visible-secret")
         with patch("builtins.print") as out:
             print_results("host", valid, [
-                ProtocolResult("cred", True, "AUTH", "verified via LDAP"),
+                ProtocolResult("cred", True, "AUTH", "SMB: login verified"),
                 ProtocolResult("smb", False, "NO", "STATUS_LOGON_FAILURE"),
+                ProtocolResult("ldap", True, "READ", "Enumerated 4 users"),
             ], quiet=True)
         self.assertEqual(out.call_count, 1)
         text = out.call_args.args[0]
         self.assertIn("alice:visible-secret", text)
-        self.assertIn("CRED AUTH", text)
+        self.assertIn("LDAP READ", text)
+        self.assertNotIn("CRED AUTH", text)
         self.assertNotIn("STATUS_LOGON_FAILURE", text)
+        with patch("builtins.print") as out:
+            print_results("host", valid, [
+                ProtocolResult("cred", True, "AUTH", "SMB: login verified"),
+            ], quiet=True)
+        out.assert_not_called()
 
     def test_no_port_probe_results_do_not_display_all_services(self):
         with patch.object(console, "print") as printer:
@@ -676,10 +683,38 @@ class ScannerTests(unittest.TestCase):
         with patch.object(console, "print") as printer:
             print_result_event(cred, verbose=True)
         shown = "\n".join(str(c.args[0]) for c in printer.call_args_list)
-        self.assertEqual(printer.call_count, 1)
-        self.assertIn("SMB: login verified", shown)
+        printer.assert_not_called()
+        self.assertNotIn("CRED", shown)
         self.assertNotIn("secret", shown)
         self.assertNotIn("Windows 10", shown)
+
+    def test_credential_gate_failure_remains_visible_without_fake_protocol(self):
+        from nxs.output import print_result_event
+        rejected = ProtocolResult("cred", False, "NO", "SMB: STATUS_LOGON_FAILURE")
+        with patch.object(console, "print") as printer:
+            print_result_event(rejected)
+        self.assertEqual(printer.call_count, 1)
+        shown = printer.call_args.args[0]
+        self.assertIn("Credential check:", shown)
+        self.assertIn("STATUS_LOGON_FAILURE", shown)
+        self.assertNotIn("CRED", shown)
+        unverified = ProtocolResult("cred", False, "ERROR", "LDAP: timeout")
+        with patch.object(console, "print") as printer:
+            print_result_event(unverified)
+        self.assertIn("LDAP: timeout", printer.call_args.args[0])
+
+    def test_nonstream_results_hide_fake_protocol(self):
+        from nxs.output import print_results
+        with patch.object(console, "print") as printer:
+            print_results("host", Credential("alice", password="secret"), [
+                ProtocolResult("cred", True, "AUTH", "SMB: login verified"),
+                ProtocolResult("smb", True, "READ", "Public[READ]"),
+            ])
+        shown = "\\n".join(str(call.args[0]) for call in printer.call_args_list)
+        self.assertIn("Public[READ]", shown)
+        self.assertNotIn("CRED", shown)
+        self.assertNotIn("SMB: login verified", shown)
+        self.assertEqual(printer.call_count, 2)  # Header and SMB, no CRED row.
 
     def test_credential_header_restores_user_and_password_styling(self):
         from nxs.output import print_scan_header

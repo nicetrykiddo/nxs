@@ -177,8 +177,7 @@ def extract_verbose_details(result: ProtocolResult) -> list[str]:
 
     proto = result.protocol.lower()
     if proto == "cred":
-        # Authentication has already been summarized in CRED AUTH.
-        # Repeating NetExec's OS banner and echoed password is just noise.
+        # Internal gate results are never verbose protocol rows.
         return details
 
     def add(line: str) -> None:
@@ -316,6 +315,19 @@ def extract_verified_evidence(result: ProtocolResult) -> list[str]:
 
 
 def print_result_event(result: ProtocolResult, verbose: bool = False) -> None:
+    if result.protocol.lower() == "cred":
+        # This is the internal authentication gate, not a real protocol.
+        # Hide successful validations but surface failures so scans never
+        # appear to have silently skipped every protocol.
+        if not result.ok:
+            style = LEVEL_STYLE.get(result.level, "yellow")
+            mark = LEVEL_MARK.get(result.level, "[!]")
+            console.print(
+                f"  [{style}]{mark}[/{style}] Credential check: "
+                f"{escape(result.proof)}", highlight=False,
+            )
+        return
+
     style = LEVEL_STYLE.get(result.level, "white")
     mark = LEVEL_MARK.get(result.level, "[*]")
 
@@ -357,7 +369,7 @@ def print_results(
     if quiet:
         identity = cred_label(user) if isinstance(user, Credential) else user
         for result in results:
-            if result.level not in {"NO", "UNCLEAR"}:
+            if result.protocol.lower() != "cred" and result.level not in {"NO", "UNCLEAR"}:
                 print(f"{target} {identity} {result.protocol.upper()} {result.level} {result.proof}")
         return
 
